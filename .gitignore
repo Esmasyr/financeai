@@ -1,5 +1,13 @@
-venv/ 
-__pycache__/ 
-*.pyc 
-.vscode/ 
-*.db 
+venv/
+__pycache__/
+*.pyc
+.vscode/
+
+# DATA FILES
+data/
+*.csv
+*.parquet
+*.json
+
+# outputs
+outputs/
