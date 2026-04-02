@@ -8,42 +8,61 @@ Veri Yapısı ve Kullanımı
 
 Veri seti büyük boyutlu olduğu için iki ayrı kaynak kullanılmıştır:
 
-- financeai: Kart ve müşteri bilgileri (kart türü, kredi limiti, hesap açılış tarihi vb.)
+* financeai: Kart ve müşteri bilgileri (kart türü, kredi limiti, hesap açılış tarihi vb.)
 
 \*auth: Kullanıcı işlem geçmişi ve davranışsal verileri (toplam harcama, işlem sayısı, hata sayısı vb.)
 
-Bu iki veri seti, ortak anahtar client_id üzerinden birleştirilir. Böylece her kullanıcı için finansal ve davranışsal bilgiler tek bir veri yapısında toplanmış olur.
+Bu iki veri seti, ortak anahtar client\_id üzerinden birleştirilir. Böylece her kullanıcı için finansal ve davranışsal bilgiler tek bir veri yapısında toplanmış olur.
 
 Modelleme Yaklaşımı
 
-- Hedef Değişken (Target):
-  card_on_dark_web → Kart bilgilerinin sızdırılıp sızdırılmadığını gösterir.
-- Bağımsız Değişkenler (Features):
-  Kart bilgileri, işlem verileri ve türetilmiş metrikler (ortalama işlem tutarı, işlem başına hata oranı vb.)
-- Amaç:
-  Kullanıcı davranışlarını analiz ederek anormal işlem örüntülerini tespit etmek ve fraud riskini doğru şekilde tahmin etmek. Risk skorlaması ile kullanıcılar düşük, orta ve yüksek risk kategorilerine ayrılır.
+* Hedef Değişken (Target):
+card\_on\_dark\_web → Kart bilgilerinin sızdırılıp sızdırılmadığını gösterir.
+* Bağımsız Değişkenler (Features):
+Kart bilgileri, işlem verileri ve türetilmiş metrikler (ortalama işlem tutarı, işlem başına hata oranı vb.)
+* Amaç:
+Kullanıcı davranışlarını analiz ederek anormal işlem örüntülerini tespit etmek ve fraud riskini doğru şekilde tahmin etmek. Risk skorlaması ile kullanıcılar düşük, orta ve yüksek risk kategorilerine ayrılır.
 
 Kurulum ve Kullanım
 
 1. Repo’yu klonlayın:
-   git clone https://github.com/Esmasyr/financeai.git
-   cd financeai
-
+git clone https://github.com/Esmasyr/financeai.git
+cd financeai
 2. Sanal ortam oluşturun ve aktif edin:
-   Windows: python -m venv venv ve venv\Scripts\activate
-   Mac/Linux: python -m venv venv ve source venv/bin/activate
-
+Windows: python -m venv venv ve venv\\Scripts\\activate
+Mac/Linux: python -m venv venv ve source venv/bin/activate
 3. Gerekli paketleri yükleyin:
-   pip install -r requirements.txt
-
+pip install -r requirements.txt
 4. Veri setini data/ klasörüne koyun ve proje dosyalarını çalıştırın.
 
 Özellikler
 
-- Fraud detection modeli (RandomForest veya XGBoost)
+* Fraud detection modeli (RandomForest veya XGBoost)
+* Veri işleme ve feature engineering pipeline
+* Risk skorlaması ve dinamik risk seviyeleri
+* Kullanımı kolay ve genişletilebilir yapı
 
-- Veri işleme ve feature engineering pipeline
 
-- Risk skorlaması ve dinamik risk seviyeleri
 
-- Kullanımı kolay ve genişletilebilir yapı
+\-Ekran GÖRÜNTÜLERİ
+
+
+
+<p align="center">
+
+&#x20; <img src="screenshot4.png" width="45%">
+
+&#x20; <img src="screenshot5.png" width="45%">
+
+</p>
+
+
+
+<p align="center">
+
+&#x20; <img src="screenshot6.png" width="45%">
+
+&#x20; <img src="screenshot7.png" width="45%">
+
+</p>
+
