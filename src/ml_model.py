@@ -1,1092 +1,1287 @@
 """
-FinSight — ML Modeli v6.0
-=================================================
-v5.1'den farklar:
-  - SHAP açıklanabilirlik (her müşteri için neden fraud?)
-  - Velocity features (son 1/7/30/90 gün hız değişimi)
-  - Merchant risk skoru
-  - Churn: gelişmiş özellik seti + RFM analizi
-  - Model kalibrasyonu (CalibratedClassifierCV)
-  - Dinamik eşik optimizasyonu (F1 max)
-  - Tüm açıklamalar model_metrics.json'a kaydediliyor
+FinanceAI
 
-Çalıştır: python src/ml_model.py
+
 """
 
-import pandas as pd
-import numpy as np
-import sqlite3
-import joblib
-import json
-import os
-import gc
-from datetime import datetime
-from sklearn.ensemble import IsolationForest, GradientBoostingClassifier
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.metrics import (roc_auc_score, confusion_matrix, f1_score,
-                              precision_score, recall_score, precision_recall_curve)
-import warnings
-warnings.filterwarnings('ignore')
+from __future__ import annotations
 
-# ── Opsiyonel kütüphaneler ──────────────────────────────
+import gc
+import hashlib
+import json
+import logging
+import os
+import sqlite3
+import subprocess
+import time
+import warnings
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from sklearn.metrics import (
+    average_precision_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.preprocessing import StandardScaler
+
+warnings.filterwarnings("ignore")
+
+# ── Opsiyonel kütüphaneler ────────────────────────────────────────────────────
 try:
     import xgboost as xgb
     XGB_AVAILABLE = True
-    print("✅ XGBoost mevcut")
 except ImportError:
     XGB_AVAILABLE = False
-    print("⚠️  XGBoost yok, GradientBoosting kullanılacak.")
+
+try:
+    import lightgbm as lgb
+    LGB_AVAILABLE = True
+except ImportError:
+    LGB_AVAILABLE = False
 
 try:
     import shap
     SHAP_AVAILABLE = True
-    print("✅ SHAP mevcut")
 except ImportError:
     SHAP_AVAILABLE = False
-    print("⚠️  SHAP yok. Kurmak için: pip install shap")
 
-BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_PATH  = os.path.join(BASE_DIR, "data")
-MODEL_PATH = os.path.join(BASE_DIR, "data")
-DB_PATH    = os.path.join(DATA_PATH, "financeai.db")
+try:
+    from imblearn.over_sampling import SMOTE
+    SMOTE_AVAILABLE = True
+except ImportError:
+    SMOTE_AVAILABLE = False
+
+# ── Loglama ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-7s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("financeai")
+
+# ── Sabitler ──────────────────────────────────────────────────────────────────
+RANDOM_SEED         = 42
+CHURN_INACTIVE_DAYS = 90
+MAX_TRAIN_ROWS      = 500_000
+BATCH_SIZE          = 100_000
+CV_FOLDS            = 5
+
+# ── Yollar ────────────────────────────────────────────────────────────────────
+BASE_DIR   = Path(__file__).resolve().parent.parent
+DATA_PATH  = BASE_DIR / "data"
+MODEL_PATH = BASE_DIR / "data"
+DB_PATH    = DATA_PATH / "financeai.db"
 
 
-# ══════════════════════════════════════════════════════════
-# 1. VERİ YÜKLEME
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# YARDIMCILAR
+# ══════════════════════════════════════════════════════════════════════════════
 
-def load_transactions_with_labels():
-    print("\n📦 İşlemler yükleniyor...")
+@contextmanager
+def _timer(label: str):
+    """Kod bloğunun süresini loglar."""
+    t0 = time.time()
+    yield
+    log.info("  ⏱  %s — %.1fs", label, time.time() - t0)
 
-    label_path = f"{DATA_PATH}/train_fraud_labels.json"
-    fraud_ids = set()
-    if os.path.exists(label_path):
-        with open(label_path, encoding='utf-8') as f:
-            raw = json.load(f)
-        labels = raw.get("target", raw)
-        fraud_ids = {int(k) for k, v in labels.items()
-                     if str(v).strip().lower() in ['yes', '1', 'true']}
-        print(f"  Fraud işlem: {len(fraud_ids):,}")
 
-    parquet_path = f"{DATA_PATH}/transactions_clean.parquet"
-    csv_path     = f"{DATA_PATH}/transactions_data.csv"
+def _section(title: str) -> None:
+    log.info("")
+    log.info("─" * 64)
+    log.info("  %s", title)
+    log.info("─" * 64)
 
-    chunks = []
+
+def _clean_currency(series: pd.Series) -> pd.Series:
+    """'$1,234.56' → 1234.56. Dönüştürülemeyen değer → 0."""
+    return (
+        pd.to_numeric(
+            series.astype(str)
+                  .str.replace("$", "", regex=False)
+                  .str.replace(",", "", regex=False)
+                  .str.strip(),
+            errors="coerce",
+        )
+        .fillna(0)
+        .clip(lower=0)          # negatif limit mantıklı değil
+    )
+
+
+def _log_series(name: str, s: pd.Series) -> None:
+    log.info(
+        "  %-32s  mean=%.4f  std=%.4f  max=%.4f  >0.5=%d",
+        name, s.mean(), s.std(), s.max(), (s > 0.5).sum(),
+    )
+
+
+def _mem_mb(df: pd.DataFrame) -> float:
+    return df.memory_usage(deep=True).sum() / 1024 / 1024
+
+
+def _validate_columns(df: pd.DataFrame, required: list[str], context: str) -> None:
+    """Zorunlu sütunların varlığını doğrular, eksikse ValueError fırlatır."""
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"[{context}] Eksik sütunlar: {missing}")
+
+
+def _git_hash() -> str:
+    """Mevcut git commit hash'ini döner (varsa)."""
     try:
-        import pyarrow.parquet as pq
-        if os.path.exists(parquet_path):
-            pf = pq.ParquetFile(parquet_path)
-            for batch in pf.iter_batches(batch_size=500_000):
-                chunks.append(_process_tx_chunk(batch.to_pandas(), fraud_ids))
-        else:
-            raise FileNotFoundError
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=BASE_DIR,
+        )
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
     except Exception:
-        for chunk in pd.read_csv(csv_path, chunksize=500_000, parse_dates=['date']):
-            chunks.append(_process_tx_chunk(chunk, fraud_ids))
+        return "unknown"
+
+
+def _df_fingerprint(df: pd.DataFrame) -> str:
+    """DataFrame içeriğinin kısa hash'i — reproducibility kontrolü için."""
+    raw = str(df.shape) + str(df.columns.tolist()) + str(df.iloc[0].tolist() if len(df) > 0 else "")
+    return hashlib.md5(raw.encode()).hexdigest()[:8]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 1. İŞLEM VERİSİ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_fraud_ids() -> set[int]:
+    """
+    train_fraud_labels.json → fraud işlem id seti.
+    Desteklenen formatlar:
+        {"target": {"123": "yes", "456": "1"}}
+        {"123": 1, "456": 0}
+        [123, 456]   (id listesi)
+    """
+    label_path = DATA_PATH / "train_fraud_labels.json"
+    if not label_path.exists():
+        log.warning("  train_fraud_labels.json bulunamadı — tüm etiketler 0.")
+        return set()
+
+    with open(label_path, encoding="utf-8") as f:
+        raw = json.load(f)
+
+    # Format 1: liste
+    if isinstance(raw, list):
+        fraud_ids = {int(x) for x in raw}
+    else:
+        labels = raw.get("target", raw)
+        fraud_ids = {
+            int(k)
+            for k, v in labels.items()
+            if str(v).strip().lower() in {"yes", "1", "true"}
+        }
+
+    if not fraud_ids:
+        log.warning(
+            "  train_fraud_labels.json yüklendi ama pozitif etiket yok. "
+            "Format: {\"target\": {\"id\": \"yes\"}} veya [id1, id2, ...]"
+        )
+    else:
+        log.info("  Fraud etiket: %d", len(fraud_ids))
+
+    return fraud_ids
+
+
+def _process_tx_chunk(chunk: pd.DataFrame, fraud_ids: set[int]) -> pd.DataFrame:
+    """Tek chunk'ı işler: temizle → özellik üret → etiketle."""
+
+    # ── Tutar ─────────────────────────────────────────────────────────────────
+    if "amount" in chunk.columns:
+        chunk["amount"] = _clean_currency(chunk["amount"])
+    elif "abs_amount" in chunk.columns:
+        chunk["amount"] = pd.to_numeric(chunk["abs_amount"], errors="coerce").fillna(0)
+    else:
+        chunk["amount"] = 0.0
+
+    chunk["errors"] = chunk.get("errors", pd.Series(["No Error"] * len(chunk))).fillna("No Error")
+
+    # ── Zaman ─────────────────────────────────────────────────────────────────
+    chunk["tarih"] = pd.to_datetime(chunk.get("date", pd.NaT), errors="coerce")
+    chunk["saat"]  = chunk["tarih"].dt.hour.fillna(12).astype(int)
+    chunk["gun"]   = chunk["tarih"].dt.dayofweek.fillna(0).astype(int)
+    chunk["ay"]    = chunk["tarih"].dt.month.fillna(1).astype(int)
+
+    # ── Temel bayraklar ───────────────────────────────────────────────────────
+    chunk["gece_islemi"]  = ((chunk["saat"] >= 22) | (chunk["saat"] <= 6)).astype(int)
+    chunk["hafta_sonu"]   = (chunk["gun"] >= 5).astype(int)
+    chunk["hata_var"]     = (chunk["errors"] != "No Error").astype(int)
+    chunk["online_islem"] = (chunk.get("use_chip", pd.Series([""] * len(chunk))) == "Online Transaction").astype(int)
+    chunk["buyuk_islem"]  = (chunk["amount"] > 1000).astype(int)
+    chunk["negatif"]      = (chunk["amount"] < 0).astype(int)
+    chunk["abs_amount"]   = chunk["amount"].abs()
+
+    # ── Z-score anomali bayrağı ───────────────────────────────────────────────
+    mu  = chunk["amount"].mean()
+    std = chunk["amount"].std() + 1e-9
+    chunk["zscore_flag"] = (((chunk["amount"] - mu) / std).abs() > 3).astype(int)
+
+    # ── Etiket ────────────────────────────────────────────────────────────────
+    chunk["fraud_label"] = (
+        chunk["id"].isin(fraud_ids).astype(int)
+        if "id" in chunk.columns else 0
+    )
+
+    keep = [
+        "client_id", "amount", "abs_amount", "saat", "gun", "ay",
+        "gece_islemi", "hafta_sonu", "hata_var", "online_islem",
+        "buyuk_islem", "negatif", "zscore_flag", "fraud_label", "tarih",
+    ]
+    return chunk[[c for c in keep if c in chunk.columns]]
+
+
+def load_transactions_with_labels() -> pd.DataFrame:
+    _section("1. İşlem verisi yükleniyor")
+
+    fraud_ids    = load_fraud_ids()
+    parquet_path = DATA_PATH / "transactions_clean.parquet"
+    csv_path     = DATA_PATH / "transactions_data.csv"
+    chunks: list[pd.DataFrame] = []
+
+    with _timer("veri yükleme"):
+        if parquet_path.exists():
+            import pyarrow.parquet as pq
+            pf = pq.ParquetFile(parquet_path)
+            for batch in pf.iter_batches(batch_size=MAX_TRAIN_ROWS):
+                chunks.append(_process_tx_chunk(batch.to_pandas(), fraud_ids))
+            log.info("  Kaynak: parquet")
+        elif csv_path.exists():
+            for chunk in pd.read_csv(csv_path, chunksize=MAX_TRAIN_ROWS, low_memory=False):
+                chunks.append(_process_tx_chunk(chunk, fraud_ids))
+            log.info("  Kaynak: CSV")
+        else:
+            raise FileNotFoundError(
+                f"İşlem verisi bulunamadı.\n"
+                f"  Aranan: {parquet_path}\n"
+                f"  Aranan: {csv_path}"
+            )
 
     df = pd.concat(chunks, ignore_index=True)
-    print(f"  Toplam işlem  : {len(df):,}")
-    print(f"  Fraud işlem   : {df['fraud_label'].sum():,} (%{df['fraud_label'].mean()*100:.2f})")
-    print(f"  Unique müşteri: {df['client_id'].nunique():,}")
+
+    log.info("  Toplam işlem   : %d", len(df))
+    log.info("  Fraud işlem    : %d  (%.3f%%)", df["fraud_label"].sum(), df["fraud_label"].mean() * 100)
+    log.info("  Unique müşteri : %d", df["client_id"].nunique())
+    log.info("  Bellek         : %.1f MB", _mem_mb(df))
+    log.info("  Parmak izi     : %s", _df_fingerprint(df))
+
+    if df["fraud_label"].sum() == 0:
+        raise AssertionError(
+            "Hiç fraud etiketi yok! "
+            "train_fraud_labels.json formatını ve işlem id'lerini kontrol et."
+        )
+
     return df
 
 
-def _process_tx_chunk(chunk, fraud_ids):
-    if 'amount' in chunk.columns:
-        chunk['amount'] = pd.to_numeric(
-            chunk['amount'].astype(str).str.replace('$', '', regex=False), errors='coerce'
-        ).fillna(0)
-    elif 'abs_amount' in chunk.columns:
-        chunk['amount'] = chunk['abs_amount']
+def add_client_context(df_tx: pd.DataFrame) -> pd.DataFrame:
+    """Her işleme müşteri bazlı istatistikler ekler (velocity + RFM temeli)."""
+    log.info("  Müşteri bağlamı hesaplanıyor...")
 
-    chunk['errors']       = chunk.get('errors', pd.Series(['None'] * len(chunk))).fillna('None')
-    chunk['tarih']        = pd.to_datetime(chunk['date'])
-    chunk['saat']         = chunk['tarih'].dt.hour
-    chunk['gun']          = chunk['tarih'].dt.dayofweek
-    chunk['ay']           = chunk['tarih'].dt.month
-
-    chunk['gece_islemi']  = ((chunk['saat'] >= 22) | (chunk['saat'] <= 6)).astype(int)
-    chunk['hafta_sonu']   = (chunk['gun'] >= 5).astype(int)
-    chunk['hata_var']     = (chunk['errors'] != 'None').astype(int)
-    chunk['online_islem'] = (chunk.get('use_chip', '') == 'Online Transaction').astype(int)
-    chunk['buyuk_islem']  = (chunk['amount'] > 1000).astype(int)
-    chunk['negatif']      = (chunk['amount'] < 0).astype(int)
-    chunk['abs_amount']   = chunk['amount'].abs()
-
-    # YENİ: yuvarlak tutar (fraud sinyali)
-    chunk['yuvarlak_tutar'] = (chunk['amount'] % 100 == 0).astype(int)
-    # YENİ: tekrarlayan tutar (aynı müşteriden aynı tutar)
-    chunk['tutar_str'] = chunk['amount'].round(2).astype(str)
-
-    if 'id' in chunk.columns:
-        chunk['fraud_label'] = chunk['id'].isin(fraud_ids).astype(int)
-    else:
-        chunk['fraud_label'] = 0
-
-    cols = ['client_id', 'amount', 'abs_amount', 'saat', 'gun', 'ay',
-            'gece_islemi', 'hafta_sonu', 'hata_var', 'online_islem',
-            'buyuk_islem', 'negatif', 'yuvarlak_tutar', 'fraud_label', 'tarih']
-    if 'merchant_id' in chunk.columns: cols.append('merchant_id')
-    if 'mcc'         in chunk.columns: cols.append('mcc')
-
-    return chunk[[c for c in cols if c in chunk.columns]]
-
-
-def add_client_context(df_tx):
-    print("  Müşteri bağlamı ekleniyor...")
-    ctx = df_tx.groupby('client_id').agg(
-        musteri_ort_tutar    =('amount', 'mean'),
-        musteri_std_tutar    =('amount', 'std'),
-        musteri_islem_sayisi =('amount', 'count'),
-        musteri_gece_oran    =('gece_islemi', 'mean'),
-        musteri_hata_oran    =('hata_var', 'mean'),
-        musteri_online_oran  =('online_islem', 'mean'),
-    ).reset_index()
-    ctx['musteri_std_tutar'] = ctx['musteri_std_tutar'].fillna(0)
-    df_tx = df_tx.merge(ctx, on='client_id', how='left')
-    df_tx['tutar_sapma'] = (
-        (df_tx['amount'] - df_tx['musteri_ort_tutar']) /
-        (df_tx['musteri_std_tutar'] + 1)
+    ctx = (
+        df_tx.groupby("client_id")
+             .agg(
+                 musteri_ort_tutar    =("amount",      "mean"),
+                 musteri_std_tutar    =("amount",      "std"),
+                 musteri_islem_sayisi =("amount",      "count"),
+                 musteri_gece_oran    =("gece_islemi", "mean"),
+                 musteri_hata_oran    =("hata_var",    "mean"),
+                 musteri_zscore_oran  =("zscore_flag", "mean"),
+             )
+             .reset_index()
     )
-    try:
-        users = pd.read_csv(f"{DATA_PATH}/users_data.csv")
-        for col in ['per_capita_income', 'yearly_income', 'total_debt']:
-            if col in users.columns:
-                users[col] = users[col].astype(str)\
-                    .str.replace('$', '', regex=False)\
-                    .str.replace(',', '', regex=False).astype(float)
-        users = users.rename(columns={'id': 'client_id'})
-        ucols = ['client_id', 'credit_score', 'total_debt', 'yearly_income']
-        ucols = [c for c in ucols if c in users.columns]
-        df_tx = df_tx.merge(users[ucols], on='client_id', how='left')
-        if 'total_debt' in df_tx.columns and 'yearly_income' in df_tx.columns:
-            df_tx['borc_gelir_orani'] = df_tx['total_debt'] / (df_tx['yearly_income'] + 1)
-    except Exception as e:
-        print(f"  ⚠️  User verisi eklenemedi: {e}")
+    ctx["musteri_std_tutar"] = ctx["musteri_std_tutar"].fillna(0)
+
+    df_tx = df_tx.merge(ctx, on="client_id", how="left")
+    df_tx["tutar_sapma"] = (
+        (df_tx["amount"] - df_tx["musteri_ort_tutar"])
+        / (df_tx["musteri_std_tutar"] + 1)
+    ).clip(-10, 10)
+
+    # Velocity: son işlem ile önceki arasındaki süre (dakika)
+    df_tx = df_tx.sort_values(["client_id", "tarih"])
+    df_tx["velocity_dk"] = (
+        df_tx.groupby("client_id")["tarih"]
+             .diff()
+             .dt.total_seconds()
+             .div(60)
+             .fillna(9999)
+             .clip(0, 9999)
+    )
 
     return df_tx.fillna(0)
 
 
-# ══════════════════════════════════════════════════════════
-# 2. YENİ: MERCHANT RİSK SKORU
-# ══════════════════════════════════════════════════════════
-
-def build_merchant_risk(df_tx) -> pd.DataFrame:
-    """
-    Her merchant için fraud oranı hesapla.
-    Bu skoru işlemlere feature olarak ekle.
-    """
-    if 'merchant_id' not in df_tx.columns:
-        df_tx['merchant_risk'] = 0.0
-        return df_tx
-
-    print("  Merchant risk skoru hesaplanıyor...")
-    merchant = df_tx.groupby('merchant_id').agg(
-        m_islem_sayisi=('fraud_label', 'count'),
-        m_fraud_oran  =('fraud_label', 'mean'),
-        m_ort_tutar   =('amount', 'mean'),
-        m_gece_oran   =('gece_islemi', 'mean'),
-    ).reset_index()
-
-    # Bayes smoothing — az işlemli merchantlar için shrinkage
-    global_fraud_oran = df_tx['fraud_label'].mean()
-    k = 50  # prior strength
-    merchant['merchant_risk'] = (
-        (merchant['m_fraud_oran'] * merchant['m_islem_sayisi'] + global_fraud_oran * k) /
-        (merchant['m_islem_sayisi'] + k)
-    )
-
-    df_tx = df_tx.merge(
-        merchant[['merchant_id', 'merchant_risk', 'm_gece_oran', 'm_ort_tutar']],
-        on='merchant_id', how='left'
-    )
-    df_tx['merchant_risk'] = df_tx['merchant_risk'].fillna(global_fraud_oran)
-    print(f"  ✅ {merchant['merchant_id'].nunique():,} merchant risk skoru hesaplandı")
-    return df_tx
-
-
-# ══════════════════════════════════════════════════════════
-# 3. YENİ: VELOCITY FEATURES
-# ══════════════════════════════════════════════════════════
-
-def add_velocity_features(df_tx) -> pd.DataFrame:
-    """
-    Velocity: kısa sürede ani artış = fraud sinyali.
-    Her işlem için son 1 saatteki işlem sayısı ve tutarı.
-    """
-    if 'tarih' not in df_tx.columns:
-        return df_tx
-
-    print("  Velocity features hesaplanıyor...")
-    df_tx = df_tx.sort_values(['client_id', 'tarih'])
-
-    # Son 1 saat
-    df_tx['velocity_1h'] = (
-        df_tx.groupby('client_id')['tarih']
-        .transform(lambda x: x.diff().dt.total_seconds().lt(3600).cumsum())
-        .fillna(0)
-    )
-
-    # Son 24 saat işlem sayısı (rolling per client)
-    df_tx['velocity_24h_islem'] = (
-        df_tx.groupby('client_id')['amount']
-        .transform(lambda x: x.rolling(24, min_periods=1).count())
-        .fillna(1)
-    )
-
-    # Son 24 saat toplam tutar
-    df_tx['velocity_24h_tutar'] = (
-        df_tx.groupby('client_id')['amount']
-        .transform(lambda x: x.rolling(24, min_periods=1).sum())
-        .fillna(0)
-    )
-
-    # Ani tutar artışı: bu işlem müşteri ortalamasının kaç katı?
-    df_tx['tutar_carpani'] = (
-        df_tx['abs_amount'] / (df_tx['musteri_ort_tutar'].abs() + 1)
-    ).clip(0, 50)
-
-    print("  ✅ Velocity features eklendi")
-    return df_tx
-
-
-# ══════════════════════════════════════════════════════════
-# 4. MODEL EĞİTİMİ
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. MODEL EĞİTİMİ
+# ══════════════════════════════════════════════════════════════════════════════
 
 TX_FEATURE_COLS = [
-    'amount', 'abs_amount', 'saat', 'gun', 'ay',
-    'gece_islemi', 'hafta_sonu', 'hata_var', 'online_islem',
-    'buyuk_islem', 'negatif', 'yuvarlak_tutar',
-    'musteri_ort_tutar', 'musteri_std_tutar', 'musteri_islem_sayisi',
-    'musteri_gece_oran', 'musteri_hata_oran', 'musteri_online_oran',
-    'tutar_sapma', 'merchant_risk',
-    'velocity_1h', 'velocity_24h_islem', 'velocity_24h_tutar', 'tutar_carpani',
-]
-
-TIME_WINDOW_COLS = [
-    'son30_islem_sayisi', 'son30_toplam_tutar', 'son30_gece_oran', 'son30_hata_oran',
-    'son7_islem_sayisi',  'son7_toplam_tutar',
-    'son90_islem_sayisi', 'son90_toplam_tutar',
-    'tutar_degisim_7_30', 'islem_degisim_7_30',
-    'gece_ani_artis',     'hata_ani_artis',
+    "amount", "abs_amount", "saat", "gun", "ay",
+    "gece_islemi", "hafta_sonu", "hata_var", "online_islem",
+    "buyuk_islem", "negatif", "zscore_flag", "velocity_dk",
+    "musteri_ort_tutar", "musteri_std_tutar", "musteri_islem_sayisi",
+    "musteri_gece_oran", "musteri_hata_oran", "musteri_zscore_oran", "tutar_sapma",
 ]
 
 
-def _find_optimal_threshold(y_true, y_prob) -> float:
-    """F1'i maksimize eden eşiği bul."""
-    precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
-    f1_scores = 2 * precisions * recalls / (precisions + recalls + 1e-9)
-    best_idx = np.argmax(f1_scores)
-    threshold = float(thresholds[best_idx]) if best_idx < len(thresholds) else 0.5
-    print(f"  Optimal eşik: {threshold:.3f}  (F1={f1_scores[best_idx]:.4f})")
-    return threshold
+def _cross_validate(model, X: pd.DataFrame, y: pd.Series, label: str) -> dict:
+    """
+    Stratified K-Fold CV — tek train/test split'e göre çok daha güvenilir.
+    Döner: mean/std AUC, F1, Precision, Recall
+    """
+    skf    = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_SEED)
+    aucs, f1s, precs, recs, aps = [], [], [], [], []
 
+    for fold, (tr_idx, te_idx) in enumerate(skf.split(X, y), 1):
+        Xtr, Xte = X.iloc[tr_idx], X.iloc[te_idx]
+        ytr, yte = y.iloc[tr_idx], y.iloc[te_idx]
 
-def train_tx_fraud_model(df_tx):
-    print("\n" + "=" * 60)
-    print("🤖 İşlem Bazlı XGBoost Fraud Modeli v6")
-    print("=" * 60)
+        model.fit(Xtr, ytr)
+        prob = model.predict_proba(Xte)[:, 1]
+        pred = model.predict(Xte)
 
-    fcols = [c for c in TX_FEATURE_COLS if c in df_tx.columns]
-    X = df_tx[fcols].fillna(0)
-    y = df_tx['fraud_label']
+        aucs.append(roc_auc_score(yte, prob))
+        f1s.append(f1_score(yte, pred, zero_division=0))
+        precs.append(precision_score(yte, pred, zero_division=0))
+        recs.append(recall_score(yte, pred, zero_division=0))
+        aps.append(average_precision_score(yte, prob))
 
-    print(f"  Özellik   : {len(fcols)}")
-    print(f"  İşlem     : {len(X):,}")
-    print(f"  Fraud oran: %{y.mean() * 100:.3f}")
+        log.info(
+            "    Fold %d/%d — AUC=%.4f  F1=%.4f  AP=%.4f",
+            fold, CV_FOLDS, aucs[-1], f1s[-1], aps[-1],
+        )
 
-    if len(X) > 500_000:
-        print("  Örnekleme yapılıyor (500K)...")
-        idx = pd.concat([
-            X[y == 1].sample(min(len(X[y == 1]), 50_000), random_state=42),
-            X[y == 0].sample(min(450_000, len(X[y == 0])), random_state=42),
-        ]).index
-        X_s, y_s = X.loc[idx], y.loc[idx]
-    else:
-        X_s, y_s = X, y
-
-    Xtr, Xte, ytr, yte = train_test_split(
-        X_s, y_s, test_size=0.2, random_state=42, stratify=y_s
+    result = {
+        "auc_mean": round(float(np.mean(aucs)), 4),
+        "auc_std":  round(float(np.std(aucs)),  4),
+        "f1_mean":  round(float(np.mean(f1s)),  4),
+        "ap_mean":  round(float(np.mean(aps)),  4),
+        "prec_mean":round(float(np.mean(precs)), 4),
+        "rec_mean": round(float(np.mean(recs)),  4),
+    }
+    log.info(
+        "  %s CV özeti — AUC %.4f ± %.4f  F1 %.4f  AP %.4f",
+        label, result["auc_mean"], result["auc_std"], result["f1_mean"], result["ap_mean"],
     )
+    return result
 
-    scale = (ytr == 0).sum() / max((ytr == 1).sum(), 1)
-    print(f"  Scale pos weight: {scale:.1f}")
+
+def _build_models(scale: float) -> dict:
+    """Eğitilecek model konfigürasyonlarını döner."""
+    models: dict[str, object] = {}
 
     if XGB_AVAILABLE:
-        base_model = xgb.XGBClassifier(
+        models["XGBoost"] = xgb.XGBClassifier(
             n_estimators=400,
             max_depth=6,
             learning_rate=0.04,
             subsample=0.8,
             colsample_bytree=0.8,
-            min_child_weight=3,
-            gamma=0.1,
-            reg_alpha=0.1,
-            reg_lambda=1.0,
             scale_pos_weight=scale,
-            random_state=42,
+            random_state=RANDOM_SEED,
             n_jobs=-1,
-            eval_metric='auc',
+            eval_metric="aucpr",   # PR-AUC — dengesiz veri için daha anlamlı
             verbosity=0,
-        )
-    else:
-        base_model = GradientBoostingClassifier(
-            n_estimators=300, max_depth=5, learning_rate=0.04,
-            subsample=0.8, random_state=42,
+            early_stopping_rounds=30,
         )
 
-    # Kalibrasyon — skor dağılımını gerçekçi hale getir
-    model = CalibratedClassifierCV(base_model, cv=3, method='isotonic')
-    model.fit(Xtr, ytr)
+    if LGB_AVAILABLE:
+        models["LightGBM"] = lgb.LGBMClassifier(
+            n_estimators=400,
+            max_depth=6,
+            learning_rate=0.04,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            scale_pos_weight=scale,
+            random_state=RANDOM_SEED,
+            n_jobs=-1,
+            verbose=-1,
+        )
 
-    ypr  = model.predict_proba(Xte)[:, 1]
-    threshold = _find_optimal_threshold(yte, ypr)
-    yp   = (ypr >= threshold).astype(int)
-
-    auc  = roc_auc_score(yte, ypr)
-    f1   = f1_score(yte, yp)
-    prec = precision_score(yte, yp, zero_division=0)
-    rec  = recall_score(yte, yp, zero_division=0)
-
-    metrics = dict(
-        model            = 'XGBoost+Calibrated' if XGB_AVAILABLE else 'GradientBoosting+Calibrated',
-        mod_tipi         = 'islem_bazli',
-        auc_roc          = round(auc, 4),
-        f1_skoru         = round(f1, 4),
-        precision        = round(prec, 4),
-        recall           = round(rec, 4),
-        accuracy         = round((yp == yte).mean(), 4),
-        optimal_threshold= round(threshold, 4),
-        confusion_matrix = confusion_matrix(yte, yp).tolist(),
-        egitim_tarihi    = datetime.now().isoformat(),
-        toplam_ornek     = len(X_s),
-        fraud_orani      = round(y.mean(), 4),
+    models["RandomForest"] = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=12,
+        min_samples_leaf=3,
+        max_features="sqrt",
+        class_weight="balanced",
+        random_state=RANDOM_SEED,
+        n_jobs=-1,
     )
 
-    print(f"\n📊 AUC:{auc:.4f}  F1:{f1:.4f}  P:{prec:.4f}  R:{rec:.4f}")
+    return models
 
-    # Feature importance
-    _extract_feature_importance(model, fcols, metrics)
 
-    # Tüm işlemler için skor
-    print("  Tüm işlemler skorlanıyor...")
-    BATCH = 100_000
+def train_and_compare_models(
+    df_tx: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict, list[str], str]:
+    _section("2. Model eğitimi")
+
+    available = []
+    if XGB_AVAILABLE:  available.append("XGBoost")
+    if LGB_AVAILABLE:  available.append("LightGBM")
+    available.append("RandomForest")
+    log.info("  Eğitilecek modeller: %s", ", ".join(available))
+
+    fcols = [c for c in TX_FEATURE_COLS if c in df_tx.columns]
+    X     = df_tx[fcols].fillna(0)
+    y     = df_tx["fraud_label"]
+
+    log.info("  Özellik sayısı : %d", len(fcols))
+    log.info("  İşlem sayısı   : %d", len(X))
+    log.info("  Fraud oranı    : %.4f%%", y.mean() * 100)
+
+    # Örnekleme
+    if len(X) > MAX_TRAIN_ROWS:
+        log.info("  %dK sınırına örnekleniyor...", MAX_TRAIN_ROWS // 1000)
+        idx  = X.sample(MAX_TRAIN_ROWS, random_state=RANDOM_SEED).index
+        X_s, y_s = X.loc[idx], y.loc[idx]
+    else:
+        X_s, y_s = X, y
+
+    scale = (y_s == 0).sum() / max((y_s == 1).sum(), 1)
+    log.info("  Sınıf ağırlığı (pos_weight): %.1f", scale)
+
+    # SMOTE — dengesizlik çok fazlaysa
+    if SMOTE_AVAILABLE and scale > 20:
+        log.info("  SMOTE uygulanıyor (scale=%.0f)...", scale)
+        try:
+            sm   = SMOTE(random_state=RANDOM_SEED, k_neighbors=min(5, int((y_s == 1).sum()) - 1))
+            X_s, y_s = sm.fit_resample(X_s, y_s)
+            scale    = 1.0
+            log.info("  SMOTE sonrası: %d örnek, fraud oranı %.2f%%",
+                     len(X_s), y_s.mean() * 100)
+        except Exception as exc:
+            log.warning("  SMOTE başarısız: %s — devam ediliyor.", exc)
+
+    Xtr, Xte, ytr, yte = train_test_split(
+        X_s, y_s, test_size=0.2, random_state=RANDOM_SEED, stratify=y_s
+    )
+
+    modeller  = _build_models(scale)
+    sonuclar: dict[str, dict] = {}
+    cv_sonuclar: dict[str, dict] = {}
+
+    for isim, model in modeller.items():
+        log.info("  [%s] eğitiliyor...", isim)
+        with _timer(f"{isim} eğitim"):
+            # XGBoost early stopping için eval_set gerekir
+            if isim == "XGBoost" and XGB_AVAILABLE:
+                model.fit(
+                    Xtr, ytr,
+                    eval_set=[(Xte, yte)],
+                    verbose=False,
+                )
+            else:
+                model.fit(Xtr, ytr)
+
+        prob = model.predict_proba(Xte)[:, 1]
+        pred = model.predict(Xte)
+        sonuclar[isim] = {
+            "model": model,
+            "auc":   roc_auc_score(yte, prob),
+            "f1":    f1_score(yte, pred, zero_division=0),
+            "prec":  precision_score(yte, pred, zero_division=0),
+            "rec":   recall_score(yte, pred, zero_division=0),
+            "ap":    average_precision_score(yte, prob),
+        }
+        log.info(
+            "  %-12s  AUC=%.4f  F1=%.4f  AP=%.4f  Prec=%.4f  Rec=%.4f",
+            isim,
+            sonuclar[isim]["auc"],
+            sonuclar[isim]["f1"],
+            sonuclar[isim]["ap"],
+            sonuclar[isim]["prec"],
+            sonuclar[isim]["rec"],
+        )
+
+        # Sadece en umut vaat eden modele CV uygula (zaman tasarrufu)
+        if isim != "RandomForest":
+            log.info("  [%s] %d-Fold CV başlıyor...", isim, CV_FOLDS)
+            cv_model = type(model)(**{
+                k: v for k, v in model.get_params().items()
+                if k != "early_stopping_rounds"
+            })
+            cv_sonuclar[isim] = _cross_validate(cv_model, X_s, y_s, isim)
+
+    # ── Kazanan seçimi ────────────────────────────────────────────────────────
+    log.info("")
+    log.info("  %-12s %8s %8s %8s %10s %8s", "Model", "AUC", "AP", "F1", "Precision", "Recall")
+    log.info("  %s", "─" * 62)
+    for isim, s in sonuclar.items():
+        log.info("  %-12s %8.4f %8.4f %8.4f %10.4f %8.4f",
+                 isim, s["auc"], s["ap"], s["f1"], s["prec"], s["rec"])
+
+    # AP (Average Precision) fraud için AUC'dan daha anlamlı ölçüt
+    en_iyi_isim = max(sonuclar, key=lambda k: sonuclar[k]["ap"])
+    en_iyi      = sonuclar[en_iyi_isim]
+    log.info("  Kazanan: %s  (AP=%.4f  AUC=%.4f)", en_iyi_isim, en_iyi["ap"], en_iyi["auc"])
+
+    # ── Tüm veri için skor ────────────────────────────────────────────────────
+    log.info("  %d işlem için skor üretiliyor...", len(X))
     probs = np.empty(len(X), dtype=np.float32)
-    for i in range(0, len(X), BATCH):
-        probs[i:i + BATCH] = model.predict_proba(
-            X.iloc[i:i + BATCH])[:, 1].astype(np.float32)
-    df_tx['fraud_prob_tx'] = probs
-    del probs
+    for i in range(0, len(X), BATCH_SIZE):
+        probs[i: i + BATCH_SIZE] = (
+            en_iyi["model"]
+            .predict_proba(X.iloc[i: i + BATCH_SIZE])[:, 1]
+            .astype(np.float32)
+        )
+    df_tx = df_tx.copy()
+    df_tx["fraud_prob_tx"] = probs
 
-    joblib.dump(model,     f"{MODEL_PATH}/xgboost_fraud.pkl")
-    joblib.dump(fcols,     f"{MODEL_PATH}/feature_cols.pkl")
-    joblib.dump(threshold, f"{MODEL_PATH}/optimal_threshold.pkl")
+    _log_series("fraud_prob_tx", pd.Series(probs))
+    if probs.max() < 0.05:
+        log.warning(
+            "  fraud_prob_tx max=%.4f çok düşük — etiket kalitesini kontrol et.",
+            probs.max(),
+        )
 
-    with open(f"{MODEL_PATH}/model_metrics.json", 'w', encoding='utf-8') as f:
+    # ── Feature importance ────────────────────────────────────────────────────
+    imp_data: dict[str, list] = {}
+    for isim, s in sonuclar.items():
+        m = s["model"]
+        if hasattr(m, "feature_importances_"):
+            imp = (
+                pd.DataFrame({"feature": fcols, "importance": m.feature_importances_})
+                  .sort_values("importance", ascending=False)
+            )
+            imp_data[isim] = imp.head(10).to_dict("records")
+            log.info("  %s — Top 5:", isim)
+            for _, r in imp.head(5).iterrows():
+                log.info("    %-32s %.4f", r["feature"], r["importance"])
+
+    # ── SHAP global özeti ─────────────────────────────────────────────────────
+    shap_summary: dict = {}
+    if SHAP_AVAILABLE and en_iyi_isim in ("XGBoost", "LightGBM"):
+        try:
+            log.info("  SHAP global özeti hesaplanıyor...")
+            sample_idx = np.random.choice(len(X), min(1000, len(X)), replace=False)
+            X_shap     = X.iloc[sample_idx]
+            explainer  = shap.TreeExplainer(en_iyi["model"])
+            sv         = explainer.shap_values(X_shap)
+            mean_abs   = np.abs(sv).mean(axis=0)
+            shap_imp   = (
+                pd.DataFrame({"feature": fcols, "shap": mean_abs})
+                  .sort_values("shap", ascending=False)
+            )
+            shap_summary = shap_imp.head(10).to_dict("records")
+            log.info("  SHAP Top 3: %s",
+                     ", ".join(f"{r['feature']}({r['shap']:.3f})" for r in shap_summary[:3]))
+        except Exception as exc:
+            log.warning("  SHAP global hesaplanamadı: %s", exc)
+
+    # ── Kaydet ────────────────────────────────────────────────────────────────
+    joblib.dump(en_iyi["model"], MODEL_PATH / "best_model.pkl")
+    joblib.dump(en_iyi["model"], MODEL_PATH / "xgboost_fraud.pkl")   # geriye uyumluluk
+    for isim, s in sonuclar.items():
+        fname = isim.lower().replace(" ", "_") + "_fraud.pkl"
+        joblib.dump(s["model"], MODEL_PATH / fname)
+    joblib.dump(fcols, MODEL_PATH / "feature_cols.pkl")
+
+    metrics = {
+        "en_iyi_model":      en_iyi_isim,
+        "pipeline_version":  "7.0",
+        "git_hash":          _git_hash(),
+        "egitim_tarihi":     datetime.now().isoformat(),
+        "toplam_ornek":      int(len(X_s)),
+        "fraud_orani":       round(float(y.mean()), 6),
+        "pos_weight":        round(float(scale), 2),
+        "smote_kullanildi":  SMOTE_AVAILABLE and scale > 20,
+        "karsilastirma": {
+            k: {
+                "auc":       round(v["auc"],  4),
+                "ap":        round(v["ap"],   4),
+                "f1":        round(v["f1"],   4),
+                "precision": round(v["prec"], 4),
+                "recall":    round(v["rec"],  4),
+            }
+            for k, v in sonuclar.items()
+        },
+        "cross_validation":  cv_sonuclar,
+        "auc_roc":           round(en_iyi["auc"],  4),
+        "average_precision": round(en_iyi["ap"],   4),
+        "f1_skoru":          round(en_iyi["f1"],   4),
+        "precision":         round(en_iyi["prec"], 4),
+        "recall":            round(en_iyi["rec"],  4),
+        "feature_importance": imp_data,
+        "shap_global":       shap_summary,
+    }
+    with open(MODEL_PATH / "model_metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
-    print("✅ Fraud modeli kaydedildi")
-    return df_tx, metrics, fcols, threshold
+    log.info("  Modeller ve metrikler kaydedildi.")
+    return df_tx, metrics, fcols, en_iyi_isim
 
 
-def _extract_feature_importance(model, fcols, metrics):
-    """Kalibreli modelden feature importance çek."""
-    try:
-        if hasattr(model, 'estimators_'):
-            # CalibratedClassifierCV — ilk base estimator'dan al
-            base = model.estimators_[0].estimator if hasattr(
-                model.estimators_[0], 'estimator') else model.estimators_[0]
-        elif hasattr(model, 'calibrated_classifiers_'):
-            base = model.calibrated_classifiers_[0].estimator
-        else:
-            base = model
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. MÜŞTERİ BAZINA TOPLAMA
+# ══════════════════════════════════════════════════════════════════════════════
 
-        if hasattr(base, 'feature_importances_'):
-            imp = pd.DataFrame({
-                'feature': fcols,
-                'importance': base.feature_importances_
-            }).sort_values('importance', ascending=False)
-            metrics['feature_importance'] = imp.head(20).to_dict('records')
-            print("🔍 Top 5:", ", ".join(
-                f"{r.feature}({r.importance:.3f})" for _, r in imp.head(5).iterrows()
-            ))
-    except Exception as e:
-        print(f"  ⚠️  Feature importance alınamadı: {e}")
+def aggregate_to_client(df_tx: pd.DataFrame) -> pd.DataFrame:
+    _section("3. Müşteri bazına toplama")
 
+    needed = [
+        "client_id", "fraud_prob_tx", "amount", "gece_islemi",
+        "hata_var", "online_islem", "hafta_sonu", "buyuk_islem",
+        "negatif", "zscore_flag", "velocity_dk", "tarih",
+    ]
+    df_s = df_tx[[c for c in needed if c in df_tx.columns]]
 
-# ══════════════════════════════════════════════════════════
-# 5. YENİ: SHAP AÇIKLANABILIRLIK
-# ══════════════════════════════════════════════════════════
-
-def compute_shap_explanations(model, X_sample: pd.DataFrame, fcols: list) -> dict:
-    """
-    SHAP değerleri hesapla.
-    Her müşteri için: hangi özellik ne kadar fraud skoruna katkı yaptı?
-
-    Döner:
-        {
-          "global": [{"feature": "tx_hata_oran", "mean_shap": 0.12}, ...],
-          "sample":  [{"client_id": 1, "top_reasons": [...]}]
-        }
-    """
-    if not SHAP_AVAILABLE:
-        print("  ⚠️  SHAP yüklü değil, atlanıyor. pip install shap")
-        return {}
-
-    print("\n🔍 SHAP açıklanabilirlik hesaplanıyor...")
-
-    try:
-        # Kalibreli modelden base estimator'u al
-        try:
-            base = model.calibrated_classifiers_[0].estimator
-        except Exception:
-            base = model
-
-        X_s = X_sample[fcols].fillna(0)
-
-        # TreeExplainer XGBoost/GBM için hızlı
-        explainer = shap.TreeExplainer(base)
-        shap_values = explainer.shap_values(X_s)
-
-        # binary classification → shap_values shape: (n, features)
-        if isinstance(shap_values, list):
-            sv = shap_values[1]
-        else:
-            sv = shap_values
-
-        # Global önem: ortalama |SHAP|
-        mean_shap = np.abs(sv).mean(axis=0)
-        global_imp = pd.DataFrame({
-            'feature': fcols,
-            'mean_shap': mean_shap.round(4)
-        }).sort_values('mean_shap', ascending=False)
-
-        print("  SHAP Top 5:", ", ".join(
-            f"{r.feature}({r.mean_shap:.3f})" for _, r in global_imp.head(5).iterrows()
-        ))
-
-        # Örnek müşteriler için bireysel açıklama (ilk 1000)
-        sample_explanations = []
-        n_sample = min(1000, len(X_s))
-        for i in range(n_sample):
-            row_shap = sv[i]
-            top_idx  = np.argsort(np.abs(row_shap))[::-1][:5]
-            reasons  = [
-                {
-                    "feature": fcols[j],
-                    "shap":    round(float(row_shap[j]), 4),
-                    "value":   round(float(X_s.iloc[i, j]), 4),
-                    "etki":    "artirdi" if row_shap[j] > 0 else "azaltti"
-                }
-                for j in top_idx
-            ]
-            sample_explanations.append({
-                "idx":         i,
-                "top_reasons": reasons
-            })
-
-        result = {
-            "global":  global_imp.head(20).to_dict('records'),
-            "sample":  sample_explanations[:100],  # ilk 100 kaydet
-        }
-
-        # Kaydet
-        shap_path = f"{MODEL_PATH}/shap_explanations.json"
-        with open(shap_path, 'w', encoding='utf-8') as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        print(f"  ✅ SHAP kaydedildi → {shap_path}")
-        return result
-
-    except Exception as e:
-        print(f"  ⚠️  SHAP hesaplanamadı: {e}")
-        return {}
-
-
-def get_client_explanation(client_id: int) -> dict:
-    """
-    Tek bir müşteri için açıklama döner.
-    API endpoint'i için kullanılır: GET /clients/{id}/explain
-    """
-    shap_path = f"{MODEL_PATH}/shap_explanations.json"
-    if not os.path.exists(shap_path):
-        return {"error": "SHAP hesaplanmamış. ml_model.py çalıştırın."}
-
-    # client_ml tablosundan skoru al
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        row = pd.read_sql(
-            f"SELECT * FROM client_ml WHERE client_id={client_id}", conn
-        ).iloc[0].to_dict()
-    except Exception:
-        conn.close()
-        return {"error": f"Müşteri {client_id} bulunamadı."}
-    conn.close()
-
-    fraud_skoru = row.get("fraud_skoru", 0)
-    fraud_tahmini = row.get("fraud_tahmini", "Normal")
-
-    # İnsan okunabilir açıklama üret
-    reasons = []
-    feature_labels = {
-        "tx_hata_oran":      "Yüksek hata oranı",
-        "dark_web_oran":     "Kartta dark web ihlali",
-        "tx_gece_oran":      "Gece saatlerinde işlem yoğunluğu",
-        "velocity_1h":       "Kısa sürede çok işlem",
-        "tutar_carpani":     "Olağandışı yüksek tutar",
-        "merchant_risk":     "Riskli merchant aktivitesi",
-        "fraud_skoru_xgb":   "ML anomali skoru yüksek",
-        "hata_ani_artis":    "Ani hata artışı",
-        "gece_ani_artis":    "Gece işlemlerinde ani artış",
-        "borc_gelir_orani":  "Yüksek borç/gelir oranı",
-    }
-
-    for key, label in feature_labels.items():
-        val = row.get(key, 0)
-        if isinstance(val, (int, float)) and val > 0.1:
-            reasons.append({"sebep": label, "deger": round(float(val), 3)})
-
-    return {
-        "client_id":     client_id,
-        "fraud_skoru":   fraud_skoru,
-        "fraud_tahmini": fraud_tahmini,
-        "aciklama":      reasons[:5] if reasons else [{"sebep": "Genel profil riski", "deger": fraud_skoru}],
-        "ozet":          _generate_summary(fraud_skoru, reasons),
-    }
-
-
-def _generate_summary(skor: float, reasons: list) -> str:
-    if skor < 20:
-        return "Bu müşteri düşük risk profiline sahip, anormal bir aktivite tespit edilmedi."
-    elif skor < 50:
-        neden = reasons[0]["sebep"] if reasons else "genel aktivite profili"
-        return f"Orta düzey risk. Öne çıkan sinyal: {neden}."
-    else:
-        nedenler = ", ".join(r["sebep"] for r in reasons[:3]) if reasons else "birden fazla sinyal"
-        return f"Yüksek risk. Tetikleyen faktörler: {nedenler}."
-
-
-# ══════════════════════════════════════════════════════════
-# 6. MÜŞTERİ BAZINA TOPLAMA
-# ══════════════════════════════════════════════════════════
-
-def aggregate_to_client(df_tx):
-    print("\n👤 Müşteri bazına toplanıyor...")
-
-    needed = ['client_id', 'fraud_prob_tx', 'amount', 'gece_islemi', 'hata_var',
-              'online_islem', 'hafta_sonu', 'buyuk_islem', 'negatif', 'tarih',
-              'yuvarlak_tutar', 'merchant_risk', 'velocity_1h', 'tutar_carpani']
-    for col in ['credit_score', 'total_debt', 'yearly_income', 'borc_gelir_orani']:
-        if col in df_tx.columns:
-            needed.append(col)
-    df_small = df_tx[[c for c in needed if c in df_tx.columns]]
-
-    client = df_small.groupby('client_id').agg(
-        fraud_skoru_xgb    =('fraud_prob_tx', lambda x: x.mean() * 100),
-        fraud_max_tx       =('fraud_prob_tx', 'max'),
-        fraud_tx_sayisi    =('fraud_prob_tx', lambda x: (x > 0.5).sum()),
-        tx_islem_sayisi    =('amount', 'count'),
-        tx_toplam_tutar    =('amount', 'sum'),
-        tx_ortalama_tutar  =('amount', 'mean'),
-        tx_std_tutar       =('amount', 'std'),
-        tx_max_tutar       =('amount', 'max'),
-        tx_gece_oran       =('gece_islemi', 'mean'),
-        tx_hata_oran       =('hata_var', 'mean'),
-        tx_online_oran     =('online_islem', 'mean'),
-        tx_hafta_sonu_oran =('hafta_sonu', 'mean'),
-        tx_buyuk_oran      =('buyuk_islem', 'mean'),
-        tx_negatif_oran    =('negatif', 'mean'),
-        tx_yuvarlak_oran   =('yuvarlak_tutar', 'mean'),
-        merchant_risk_ort  =('merchant_risk', 'mean'),
-        merchant_risk_max  =('merchant_risk', 'max'),
-        velocity_1h_max    =('velocity_1h', 'max'),
-        tutar_carpani_max  =('tutar_carpani', 'max'),
-        son_islem_tarihi   =('tarih', 'max'),
-    ).reset_index()
-
-    for col in ['credit_score', 'total_debt', 'yearly_income', 'borc_gelir_orani']:
-        if col in df_small.columns:
-            client = client.merge(
-                df_small.groupby('client_id')[col].first().reset_index(),
-                on='client_id', how='left'
-            )
+    with _timer("groupby"):
+        client = (
+            df_s.groupby("client_id")
+                .agg(
+                    fraud_skoru_xgb    =("fraud_prob_tx", lambda x: x.mean() * 100),
+                    fraud_max_tx       =("fraud_prob_tx", "max"),
+                    fraud_tx_sayisi    =("fraud_prob_tx", lambda x: (x > 0.5).sum()),
+                    tx_islem_sayisi    =("amount",        "count"),
+                    tx_toplam_tutar    =("amount",        "sum"),
+                    tx_ortalama_tutar  =("amount",        "mean"),
+                    tx_std_tutar       =("amount",        "std"),
+                    tx_max_tutar       =("amount",        "max"),
+                    tx_gece_oran       =("gece_islemi",   "mean"),
+                    tx_hata_oran       =("hata_var",      "mean"),
+                    tx_online_oran     =("online_islem",  "mean"),
+                    tx_hafta_sonu_oran =("hafta_sonu",    "mean"),
+                    tx_buyuk_oran      =("buyuk_islem",   "mean"),
+                    tx_negatif_oran    =("negatif",       "mean"),
+                    tx_zscore_oran     =("zscore_flag",   "mean"),
+                    tx_velocity_ort    =("velocity_dk",   "mean"),
+                    son_islem_tarihi   =("tarih",         "max"),
+                )
+                .reset_index()
+        )
 
     client = client.fillna(0)
+
+    # RFM skoru
+    if "son_islem_tarihi" in client.columns:
+        bugun = pd.Timestamp.now()
+        client["son_islem_tarihi"] = pd.to_datetime(client["son_islem_tarihi"], errors="coerce")
+        client["rfm_recency"]  = (bugun - client["son_islem_tarihi"]).dt.days.fillna(9999).clip(0, 9999)
+        client["rfm_frequency"]= client["tx_islem_sayisi"]
+        client["rfm_monetary"] = client["tx_toplam_tutar"]
+
     client = _add_time_window_features(df_tx, client)
-    print(f"✅ {len(client):,} müşteri, {len(client.columns)} özellik")
+
+    log.info("  Müşteri sayısı : %d", len(client))
+    log.info("  Sütun sayısı   : %d", len(client.columns))
     return client
 
 
-# ══════════════════════════════════════════════════════════
-# 7. ZENGİNLEŞTİRME — TÜM MÜŞTERİLER
-# ══════════════════════════════════════════════════════════
-
-def enrich_with_all_clients(df_client):
-    print("\n🔗 Tüm müşteri tabanıyla birleştiriliyor...")
-    conn = sqlite3.connect(DB_PATH)
-
-    try:
-        ozet = pd.read_sql("SELECT client_id, toplam, islem, hata FROM client_ozet", conn)
-        print(f"  client_ozet: {len(ozet):,}")
-    except Exception as e:
-        print(f"  ⚠️  client_ozet okunamadı: {e}")
-        ozet = pd.DataFrame(columns=['client_id', 'toplam', 'islem', 'hata'])
-
-    try:
-        risk = pd.read_sql("SELECT client_id, risk_skoru FROM client_risk", conn)
-        print(f"  client_risk: {len(risk):,}")
-    except Exception:
-        risk = pd.DataFrame(columns=['client_id', 'risk_skoru'])
-
-    conn.close()
-
-    if not ozet.empty:
-        merged = ozet[['client_id']].merge(df_client, on='client_id', how='left')
-        numeric_cols = merged.select_dtypes(include=[np.number]).columns
-        col_means = df_client[numeric_cols].mean()
-        for col in numeric_cols:
-            if col != 'client_id':
-                merged[col] = merged[col].fillna(col_means.get(col, 0))
-        df_client = merged
-        print(f"  ✅ Birleştirme sonrası: {len(df_client):,}")
-
-    if not risk.empty:
-        df_client = df_client.merge(risk, on='client_id', how='left')
-        df_client['risk_skoru'] = df_client['risk_skoru'].fillna(0)
-    else:
-        df_client['risk_skoru'] = 0.0
-
-    return df_client
-
-
-# ══════════════════════════════════════════════════════════
-# 8. ZAMAN PENCERESİ
-# ══════════════════════════════════════════════════════════
-
-def _add_time_window_features(df_tx, df_client):
-    if 'tarih' not in df_tx.columns:
+def _add_time_window_features(df_tx: pd.DataFrame, df_client: pd.DataFrame) -> pd.DataFrame:
+    """7 / 30 / 90 günlük pencere özellikleri."""
+    if "tarih" not in df_tx.columns:
+        log.warning("  'tarih' yok — zaman pencereleri atlandı.")
         return df_client
 
-    if df_tx['tarih'].dtype == object:
-        df_tx = df_tx.copy()
-        df_tx['tarih'] = pd.to_datetime(df_tx['tarih'])
+    df_tx   = df_tx.copy()
+    df_tx["tarih"] = pd.to_datetime(df_tx["tarih"], errors="coerce")
+    df_tx   = df_tx.dropna(subset=["tarih"])
+    bugun   = df_tx["tarih"].max()
 
-    bugun = df_tx['tarih'].max()
+    def _window(days: int, prefix: str) -> pd.DataFrame:
+        sub = df_tx[df_tx["tarih"] >= bugun - pd.Timedelta(days=days)]
+        if sub.empty:
+            log.warning("  %s penceresi boş.", prefix)
+            return pd.DataFrame(columns=["client_id"])
+        return (
+            sub.groupby("client_id")
+               .agg(**{
+                   f"{prefix}_islem_sayisi": ("amount",      "count"),
+                   f"{prefix}_toplam_tutar": ("amount",      "sum"),
+                   f"{prefix}_gece_oran":    ("gece_islemi", "mean"),
+                   f"{prefix}_hata_oran":    ("hata_var",    "mean"),
+               })
+               .reset_index()
+        )
 
-    def window_agg(days, prefix):
-        sub = df_tx[df_tx['tarih'] >= bugun - pd.Timedelta(days=days)]
-        if len(sub) == 0:
-            return pd.DataFrame(columns=['client_id'])
-        return sub.groupby('client_id').agg(**{
-            f'{prefix}_islem_sayisi': ('amount', 'count'),
-            f'{prefix}_toplam_tutar': ('amount', 'sum'),
-            f'{prefix}_gece_oran':    ('gece_islemi', 'mean'),
-            f'{prefix}_hata_oran':    ('hata_var', 'mean'),
-        }).reset_index()
+    w7  = _window(7,  "son7")
+    w30 = _window(30, "son30")
+    w90 = _window(90, "son90")
 
-    for days, prefix in [(7, 'son7'), (30, 'son30'), (90, 'son90')]:
-        df_client = df_client.merge(window_agg(days, prefix), on='client_id', how='left')
+    for w, cols in [
+        (w7,  ["client_id", "son7_islem_sayisi",  "son7_toplam_tutar"]),
+        (w30, None),
+        (w90, ["client_id", "son90_islem_sayisi", "son90_toplam_tutar",
+                "son90_gece_oran", "son90_hata_oran"]),
+    ]:
+        merge_cols = [c for c in (cols or w.columns.tolist()) if c in w.columns]
+        if len(merge_cols) > 1:
+            df_client = df_client.merge(w[merge_cols], on="client_id", how="left")
 
     df_client = df_client.fillna(0)
 
-    df_client['tutar_degisim_7_30'] = (
-        df_client.get('son7_toplam_tutar', 0) /
-        (df_client.get('son30_toplam_tutar', 0) / 4.3 + 1e-6)
+    eps = 1e-6
+    df_client["tutar_degisim_7_30"] = (
+        df_client.get("son7_toplam_tutar", 0)
+        / (df_client.get("son30_toplam_tutar", 0) / 4.3 + eps)
     ).clip(0, 10)
 
-    df_client['islem_degisim_7_30'] = (
-        df_client.get('son7_islem_sayisi', 0) /
-        (df_client.get('son30_islem_sayisi', 0) / 4.3 + 1e-6)
+    df_client["islem_degisim_7_30"] = (
+        df_client.get("son7_islem_sayisi", 0)
+        / (df_client.get("son30_islem_sayisi", 0) / 4.3 + eps)
     ).clip(0, 10)
 
-    df_client['gece_ani_artis'] = (
-        df_client.get('son7_gece_oran', 0) - df_client.get('son90_gece_oran', 0)
+    df_client["gece_ani_artis"] = (
+        df_client.get("son7_gece_oran", pd.Series(0, index=df_client.index))
+        - df_client.get("son90_gece_oran", pd.Series(0, index=df_client.index))
     ).clip(-1, 1)
 
-    df_client['hata_ani_artis'] = (
-        df_client.get('son7_hata_oran', 0) - df_client.get('son90_hata_oran', 0)
+    df_client["hata_ani_artis"] = (
+        df_client.get("son7_hata_oran", pd.Series(0, index=df_client.index))
+        - df_client.get("son90_hata_oran", pd.Series(0, index=df_client.index))
     ).clip(-1, 1)
 
+    log.info("  Zaman penceresi özellikleri eklendi.")
     return df_client
 
 
-# ══════════════════════════════════════════════════════════
-# 9. KART & KULLANICI ÖZELLİKLERİ
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. KART & KULLANICI VERİSİ
+# ══════════════════════════════════════════════════════════════════════════════
 
-def build_user_features():
-    df = pd.read_csv(f"{DATA_PATH}/users_data.csv")
-    for col in ['per_capita_income', 'yearly_income', 'total_debt']:
+def build_user_features() -> pd.DataFrame:
+    path = DATA_PATH / "users_data.csv"
+    if not path.exists():
+        log.warning("  users_data.csv bulunamadı.")
+        return pd.DataFrame(columns=["client_id"])
+
+    df = pd.read_csv(path, low_memory=False)
+    for col in ["per_capita_income", "yearly_income", "total_debt"]:
         if col in df.columns:
-            df[col] = df[col].astype(str)\
-                .str.replace('$', '', regex=False)\
-                .str.replace(',', '', regex=False).astype(float)
-    cols = [c for c in ['id', 'current_age', 'credit_score', 'num_credit_cards',
-                         'per_capita_income', 'yearly_income', 'total_debt'] if c in df.columns]
-    feat = df[cols].copy()
-    feat.columns = ['client_id'] + cols[1:]
-    if 'total_debt' in feat.columns and 'yearly_income' in feat.columns:
-        feat['borc_gelir_orani'] = feat['total_debt'] / (feat['yearly_income'] + 1)
+            df[col] = _clean_currency(df[col])
 
-    # YENİ: RFM benzeri özellikler
-    if 'yearly_income' in feat.columns:
-        feat['gelir_segment'] = pd.qcut(
-            feat['yearly_income'], q=4, labels=[1, 2, 3, 4], duplicates='drop'
-        ).astype(float)
+    df = df.rename(columns={"id": "client_id"})
+    keep = ["client_id", "current_age", "credit_score",
+            "per_capita_income", "yearly_income", "total_debt"]
+    feat = df[[c for c in keep if c in df.columns]].copy()
+
+    if {"total_debt", "yearly_income"}.issubset(feat.columns):
+        feat["borc_gelir_orani"] = (
+            feat["total_debt"] / (feat["yearly_income"] + 1)
+        ).clip(0, 50)
+
+    if "credit_score" in feat.columns:
+        feat["dusuk_kredi"] = (feat["credit_score"] < 600).astype(int)
 
     return feat.fillna(0)
 
 
-def build_card_features():
-    df = pd.read_csv(f"{DATA_PATH}/cards_data.csv")
-    df['credit_limit'] = df['credit_limit'].astype(str)\
-        .str.replace('$', '', regex=False)\
-        .str.replace(',', '', regex=False).astype(float)
-    df['dark_web_flag'] = (df['card_on_dark_web'] == 'Yes').astype(int)
+def build_card_features() -> pd.DataFrame:
+    path = DATA_PATH / "cards_data.csv"
+    if not path.exists():
+        log.warning("  cards_data.csv bulunamadı.")
+        return pd.DataFrame(columns=["client_id"])
 
-    feat = df.groupby('client_id').agg(
-        kart_adedi    =('id', 'count'),
-        toplam_limit  =('credit_limit', 'sum'),
-        dark_web_oran =('dark_web_flag', 'mean'),
-        chip_oran     =('has_chip', lambda x: (x == 'YES').mean()),
-    ).reset_index()
-    feat['dark_web_kart'] = (feat['dark_web_oran'] > 0).astype(int)
+    df = pd.read_csv(path, low_memory=False)
+    df["credit_limit"] = _clean_currency(df.get("credit_limit", pd.Series(dtype=str)))
 
-    # YENİ: limit kullanım yoğunluğu (dışarıdan tx ile birleşince)
-    feat['limit_basi_kart'] = feat['toplam_limit'] / (feat['kart_adedi'] + 1)
+    if "card_on_dark_web" in df.columns:
+        df["dark_web_flag"] = (
+            df["card_on_dark_web"].astype(str).str.strip().str.lower() == "yes"
+        ).astype(int)
+    else:
+        log.warning("  'card_on_dark_web' sütunu yok — 0 atanıyor.")
+        df["dark_web_flag"] = 0
+
+    feat = (
+        df.groupby("client_id")
+          .agg(
+              kart_adedi    =("id",           "count"),
+              toplam_limit  =("credit_limit", "sum"),
+              ort_limit     =("credit_limit", "mean"),
+              dark_web_oran =("dark_web_flag","mean"),
+              dark_web_kart =("dark_web_flag","max"),
+              chip_oran     =("has_chip",     lambda x: (x == "YES").mean()
+                              if "has_chip" in df.columns else 0),
+          )
+          .reset_index()
+    )
+    log.info(
+        "  dark_web_kart=1: %d müşteri (toplam %d)",
+        (feat["dark_web_kart"] == 1).sum(), len(feat),
+    )
     return feat.fillna(0)
 
 
-# ══════════════════════════════════════════════════════════
-# 10. ISOLATION FOREST
-# ══════════════════════════════════════════════════════════
+def enrich_with_db_features(df_client: pd.DataFrame) -> pd.DataFrame:
+    _section("4. DB zenginleştirme")
+
+    if not DB_PATH.exists():
+        log.warning("  financeai.db yok — DB adımı atlandı.")
+        return df_client
+
+    conn    = sqlite3.connect(DB_PATH)
+    eklenen = 0
+
+    TABLOLAR = {
+        "client_ozet": [
+            "client_id", "avg_transaction", "islem_basina_hata",
+            "gece_oran", "online_oran", "risk_skoru",
+            "kart_adedi", "toplam_limit", "ort_limit",
+        ],
+        "client_risk": ["client_id", "risk_skoru"],
+    }
+
+    for tablo, cols in TABLOLAR.items():
+        if "risk_skoru" in df_client.columns and tablo == "client_risk":
+            continue
+        try:
+            mevcut_cols = pd.read_sql(
+                f"SELECT name FROM pragma_table_info('{tablo}')", conn
+            )["name"].tolist()
+            secilecek = [c for c in cols if c in mevcut_cols]
+            if not secilecek or "client_id" not in secilecek:
+                log.warning("  %s: uygun sütun bulunamadı — atlandı.", tablo)
+                continue
+            df_ek     = pd.read_sql(f"SELECT {', '.join(secilecek)} FROM {tablo}", conn)
+            onceki    = len(df_client.columns)
+            df_client = df_client.merge(df_ek, on="client_id", how="left")
+            eklenen  += len(df_client.columns) - onceki
+            log.info("  %s → %d özellik eklendi.", tablo, len(df_client.columns) - onceki - 0)
+        except Exception as exc:
+            log.warning("  %s okunamadı: %s", tablo, exc)
+
+    conn.close()
+    df_client = df_client.fillna(0)
+    log.info("  Toplam eklenen özellik: %d", eklenen)
+    return df_client
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. ISOLATION FOREST
+# ══════════════════════════════════════════════════════════════════════════════
 
 CLIENT_FEATURE_COLS = [
-    'fraud_skoru_xgb', 'fraud_max_tx', 'fraud_tx_sayisi',
-    'tx_islem_sayisi', 'tx_toplam_tutar', 'tx_ortalama_tutar',
-    'tx_std_tutar', 'tx_max_tutar', 'tx_gece_oran', 'tx_hata_oran',
-    'tx_online_oran', 'tx_hafta_sonu_oran', 'tx_buyuk_oran', 'tx_negatif_oran',
-    'tx_yuvarlak_oran', 'merchant_risk_ort', 'merchant_risk_max',
-    'velocity_1h_max', 'tutar_carpani_max',
-    'dark_web_kart', 'kart_adedi', 'toplam_limit', 'dark_web_oran',
-    'son30_islem_sayisi', 'son30_toplam_tutar', 'son30_gece_oran', 'son30_hata_oran',
-    'son7_islem_sayisi',  'son7_toplam_tutar',
-    'tutar_degisim_7_30', 'islem_degisim_7_30',
-    'gece_ani_artis',     'hata_ani_artis',
-    'risk_skoru',
+    "fraud_skoru_xgb", "fraud_max_tx", "fraud_tx_sayisi",
+    "tx_islem_sayisi", "tx_toplam_tutar", "tx_ortalama_tutar",
+    "tx_std_tutar", "tx_max_tutar", "tx_gece_oran", "tx_hata_oran",
+    "tx_online_oran", "tx_hafta_sonu_oran", "tx_buyuk_oran", "tx_negatif_oran",
+    "tx_zscore_oran", "tx_velocity_ort",
+    "dark_web_kart", "kart_adedi", "toplam_limit", "dark_web_oran",
+    "son30_islem_sayisi", "son30_toplam_tutar", "son30_gece_oran", "son30_hata_oran",
+    "son7_islem_sayisi",  "son7_toplam_tutar",
+    "tutar_degisim_7_30", "islem_degisim_7_30",
+    "gece_ani_artis",     "hata_ani_artis",
+    "rfm_recency",        "rfm_frequency",      "rfm_monetary",
+    "risk_skoru",
+    "avg_transaction", "islem_basina_hata", "gece_oran", "online_oran",
+    "ort_limit", "borc_gelir_orani", "credit_score", "dusuk_kredi",
 ]
 
 
-def train_isolation_forest(df_client):
-    print("\n🌲 Isolation Forest")
+def train_isolation_forest(df_client: pd.DataFrame) -> pd.DataFrame:
+    _section("5. Isolation Forest")
+
     fcols  = [c for c in CLIENT_FEATURE_COLS if c in df_client.columns]
     X      = df_client[fcols].fillna(0)
     scaler = StandardScaler()
     Xs     = scaler.fit_transform(X)
-    iso    = IsolationForest(
-        n_estimators=300, contamination=0.05,
-        max_features=0.8, random_state=42, n_jobs=-1
+
+    iso = IsolationForest(
+        n_estimators=300,
+        contamination=0.05,
+        max_features=min(0.8, len(fcols) / len(fcols)),  # tüm özellikler kullanılsın
+        random_state=RANDOM_SEED,
+        n_jobs=-1,
     )
     iso.fit(Xs)
-    df_client['anomali_skoru'] = iso.decision_function(Xs)
-    df_client['iso_tahmin']    = (iso.predict(Xs) == -1).astype(int)
-    joblib.dump(iso,    f"{MODEL_PATH}/isolation_forest.pkl")
-    joblib.dump(scaler, f"{MODEL_PATH}/scaler.pkl")
-    print(f"  ✅ Anomali tespit: {df_client['iso_tahmin'].sum():,} müşteri")
+
+    df_client["anomali_skoru"] = iso.decision_function(Xs)
+    df_client["iso_tahmin"]    = (iso.predict(Xs) == -1).astype(int)
+
+    joblib.dump(iso,    MODEL_PATH / "isolation_forest.pkl")
+    joblib.dump(scaler, MODEL_PATH / "scaler.pkl")
+    joblib.dump(fcols,  MODEL_PATH / "iso_feature_cols.pkl")
+
+    n_anomali = int(df_client["iso_tahmin"].sum())
+    log.info("  Anomali: %d  (%.1f%%)", n_anomali, n_anomali / len(df_client) * 100)
     return df_client
 
 
-# ══════════════════════════════════════════════════════════
-# 11. GELİŞTİRİLMİŞ CHURN MODELİ
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. CHURN
+# ══════════════════════════════════════════════════════════════════════════════
 
-def build_churn_labels(df_client):
-    """
-    Gelişmiş churn: sadece son işlem tarihi değil,
-    işlem sıklığı + tutar düşüşü de dikkate alınır.
-    """
-    print("\n📉 Churn etiketleri üretiliyor...")
+def build_churn_labels(df_client: pd.DataFrame) -> pd.DataFrame:
+    _section("6. Churn etiketleri")
 
-    df_client['churn_label'] = 0
-    df_client['churn_riski'] = 0.5
-
-    if 'son_islem_tarihi' not in df_client.columns:
+    if "son_islem_tarihi" not in df_client.columns:
+        log.warning("  son_islem_tarihi yok — churn_label=0.")
+        df_client["churn_label"] = 0
+        df_client["churn_riski"] = 0.5
         return df_client
 
     bugun = pd.Timestamp.now()
-    df_client['son_islem_tarihi'] = pd.to_datetime(
-        df_client['son_islem_tarihi'], errors='coerce'
-    )
-    df_client['gun_fark'] = (
-        bugun - df_client['son_islem_tarihi']
-    ).dt.days.fillna(9999)
+    df_client["son_islem_tarihi"] = pd.to_datetime(df_client["son_islem_tarihi"], errors="coerce")
+    df_client["gun_fark"] = (
+        (bugun - df_client["son_islem_tarihi"]).dt.days.fillna(9999)
+    ).clip(0, 9999)
 
-    # RFM: Recency + Frequency + Monetary
-    df_client['rfm_recency']   = df_client['gun_fark'].rank(pct=True, ascending=False)
-    df_client['rfm_frequency'] = df_client.get('tx_islem_sayisi', 0).rank(pct=True)
-    df_client['rfm_monetary']  = df_client.get('tx_toplam_tutar', 0).rank(pct=True)
-    df_client['rfm_skor']      = (
-        df_client['rfm_recency'] * 0.5 +
-        df_client['rfm_frequency'] * 0.3 +
-        df_client['rfm_monetary'] * 0.2
-    )
+    df_client["churn_label"] = (df_client["gun_fark"] >= CHURN_INACTIVE_DAYS).astype(int)
+    df_client["churn_riski"] = (df_client["gun_fark"].clip(0, 365) / 365).round(4)
 
-    # Dinamik eşik
-    esik = float(df_client['gun_fark'].quantile(0.5))
-    df_client['churn_label'] = (df_client['gun_fark'] >= esik).astype(int)
-
-    # Churn riski: yüksek recency + düşük frequency = yüksek risk
-    df_client['churn_riski'] = np.clip(
-        df_client['rfm_recency'] * 0.6 +
-        (1 - df_client['rfm_frequency']) * 0.4, 0, 1
-    )
-
-    print(f"  Eşik: {esik:.0f} gün | "
-          f"Churn=1: {df_client['churn_label'].sum():,} | "
-          f"Churn=0: {(df_client['churn_label']==0).sum():,}")
+    n0 = int((df_client["churn_label"] == 0).sum())
+    n1 = int((df_client["churn_label"] == 1).sum())
+    log.info("  Eşik: %d gün | Aktif=%d  Churn=%d  (%.1f%%)",
+             CHURN_INACTIVE_DAYS, n0, n1, n1 / max(n0 + n1, 1) * 100)
     return df_client
 
 
-def train_churn_model(df_client):
-    print("\n📉 Churn Modeli")
-    fcols = [c for c in CLIENT_FEATURE_COLS + ['rfm_skor', 'gun_fark'] if c in df_client.columns]
-    X = df_client[fcols].fillna(0)
-    y = df_client['churn_label']
+def train_churn_model(df_client: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    _section("6b. Churn modeli")
+
+    fcols = [c for c in CLIENT_FEATURE_COLS if c in df_client.columns]
+    X     = df_client[fcols].fillna(0)
+    y     = df_client["churn_label"]
 
     if y.nunique() < 2:
-        print("  ⚠️  Churn atlandı (tek sınıf)")
-        df_client['churn_skoru']   = 0.0
-        df_client['churn_tahmini'] = 'Dusuk Risk'
-        return df_client, {'churn_auc': 0.0}
+        log.warning("  Tek sınıf — churn modeli eğitilemiyor.")
+        df_client["churn_skoru"]   = 0.0
+        df_client["churn_tahmini"] = "Dusuk Risk"
+        return df_client, {"churn_auc": 0.0, "churn_ap": 0.0}
 
     Xtr, Xte, ytr, yte = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X, y, test_size=0.2, random_state=RANDOM_SEED, stratify=y
     )
     scale = (ytr == 0).sum() / max((ytr == 1).sum(), 1)
 
     if XGB_AVAILABLE:
-        base = xgb.XGBClassifier(
-            n_estimators=250, max_depth=5, learning_rate=0.04,
-            scale_pos_weight=scale, random_state=42,
+        model = xgb.XGBClassifier(
+            n_estimators=200, max_depth=5, learning_rate=0.05,
+            scale_pos_weight=scale, random_state=RANDOM_SEED,
             n_jobs=-1, verbosity=0,
         )
+    elif LGB_AVAILABLE:
+        model = lgb.LGBMClassifier(
+            n_estimators=200, max_depth=5, learning_rate=0.05,
+            scale_pos_weight=scale, random_state=RANDOM_SEED,
+            n_jobs=-1, verbose=-1,
+        )
     else:
-        base = GradientBoostingClassifier(
-            n_estimators=200, max_depth=4, random_state=42
+        model = RandomForestClassifier(
+            n_estimators=150, max_depth=8, class_weight="balanced",
+            random_state=RANDOM_SEED, n_jobs=-1,
         )
 
-    model = CalibratedClassifierCV(base, cv=3, method='isotonic')
     model.fit(Xtr, ytr)
+    prob = model.predict_proba(Xte)[:, 1]
+    auc  = roc_auc_score(yte, prob)
+    ap   = average_precision_score(yte, prob)
 
-    ypr = model.predict_proba(Xte)[:, 1]
-    auc = roc_auc_score(yte, ypr)
-
-    df_client['churn_skoru'] = (model.predict_proba(X)[:, 1] * 100).round(2)
-    df_client['churn_tahmini'] = pd.cut(
-        df_client['churn_skoru'],
+    df_client["churn_skoru"] = (model.predict_proba(X)[:, 1] * 100).round(2)
+    df_client["churn_tahmini"] = pd.cut(
+        df_client["churn_skoru"],
         bins=[-np.inf, 30, 60, np.inf],
-        labels=['Dusuk Risk', 'Orta Risk', 'Yuksek Risk']
+        labels=["Dusuk Risk", "Orta Risk", "Yuksek Risk"],
     ).astype(str)
 
-    joblib.dump(model, f"{MODEL_PATH}/churn_model.pkl")
-    print(f"  ✅ AUC: {auc:.4f}")
-    return df_client, {'churn_auc': round(auc, 4)}
+    joblib.dump(model, MODEL_PATH / "churn_model.pkl")
+    log.info("  Churn AUC=%.4f  AP=%.4f", auc, ap)
+    return df_client, {"churn_auc": round(auc, 4), "churn_ap": round(ap, 4)}
 
 
-# ══════════════════════════════════════════════════════════
-# 12. FİNAL SKOR
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. SHAP AÇIKLAMALARI
+# ══════════════════════════════════════════════════════════════════════════════
 
-def compute_final_fraud_score(df_client):
-    print("\n⚡ Final fraud skoru hesaplanıyor...")
+def compute_shap_explanations(df_client: pd.DataFrame, fcols: list[str]) -> pd.DataFrame:
+    """
+    Her müşteri için top-3 SHAP nedeni hesaplar.
+    Yeni sütunlar: shap_reason_1/2/3, shap_val_1/2/3
+    """
+    if not SHAP_AVAILABLE:
+        log.warning("  SHAP kurulu değil — pip install shap")
+        return df_client
+
+    model_path = MODEL_PATH / "best_model.pkl"
+    if not model_path.exists():
+        log.warning("  best_model.pkl bulunamadı — SHAP atlandı.")
+        return df_client
+
+    try:
+        model = joblib.load(model_path)
+        X     = df_client[[c for c in fcols if c in df_client.columns]].fillna(0)
+
+        log.info("  SHAP açıklamaları hesaplanıyor (%d müşteri)...", len(X))
+        explainer = shap.TreeExplainer(model)
+
+        r1_list, r2_list, r3_list = [], [], []
+        v1_list, v2_list, v3_list = [], [], []
+
+        for start in range(0, len(X), BATCH_SIZE):
+            batch      = X.iloc[start: start + BATCH_SIZE]
+            sv         = explainer.shap_values(batch)
+            cols_list  = X.columns.tolist()
+
+            for row in sv:
+                idx = np.argsort(np.abs(row))[::-1]
+                r1_list.append(cols_list[idx[0]] if len(idx) > 0 else "")
+                r2_list.append(cols_list[idx[1]] if len(idx) > 1 else "")
+                r3_list.append(cols_list[idx[2]] if len(idx) > 2 else "")
+                v1_list.append(round(float(row[idx[0]]), 4) if len(idx) > 0 else 0.0)
+                v2_list.append(round(float(row[idx[1]]), 4) if len(idx) > 1 else 0.0)
+                v3_list.append(round(float(row[idx[2]]), 4) if len(idx) > 2 else 0.0)
+
+            log.info("  SHAP: %d/%d", min(start + BATCH_SIZE, len(X)), len(X))
+
+        df_client = df_client.copy()
+        df_client["shap_reason_1"] = r1_list
+        df_client["shap_reason_2"] = r2_list
+        df_client["shap_reason_3"] = r3_list
+        df_client["shap_val_1"]    = v1_list
+        df_client["shap_val_2"]    = v2_list
+        df_client["shap_val_3"]    = v3_list
+
+        log.info("  SHAP tamamlandı.")
+
+    except Exception as exc:
+        log.error("  SHAP hatası: %s", exc)
+
+    return df_client
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. FİNAL FRAUD SKORU
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_final_fraud_score(df_client: pd.DataFrame) -> pd.DataFrame:
+    """
+    XGBoost/LGB skoru + Isolation Forest + kural tabanlı skor
+    normalize ağırlıklarla birleştirilir.
+
+    Ağırlık mantığı:
+      - ML modeli varyansı yüksekse → daha güvenilir → daha fazla ağırlık
+      - Isolation Forest aralığı geniş → daha güvenilir
+      - Kural tabanlı kısım her zaman en az %10 ağırlık alır
+      - Toplam = 1 (normalize)
+    """
+    _section("7. Final fraud skoru")
+
+    df_client = df_client.copy()
     s = np.zeros(len(df_client))
-    agirliklar = {}
 
-    if 'fraud_skoru_xgb' in df_client.columns:
-        var = df_client['fraud_skoru_xgb'].var()
-        w   = 0.55 if var > 5 else (0.45 if var > 1 else 0.35)
-        s  += df_client['fraud_skoru_xgb'] * w
-        agirliklar['xgb'] = w
+    raw_w: dict[str, float] = {}
 
-    iso_w = 0.0
-    if 'anomali_skoru' in df_client.columns:
-        rng = df_client['anomali_skoru'].max() - df_client['anomali_skoru'].min()
+    if "fraud_skoru_xgb" in df_client.columns:
+        var = df_client["fraud_skoru_xgb"].var()
+        raw_w["ml"] = 0.60 if var > 10 else (0.50 if var > 3 else 0.40)
+    else:
+        raw_w["ml"] = 0.0
+
+    iso_n = pd.Series(np.zeros(len(df_client)), index=df_client.index)
+    if "anomali_skoru" in df_client.columns:
+        rng = df_client["anomali_skoru"].max() - df_client["anomali_skoru"].min()
         if rng > 1e-6:
-            iso_n = (-df_client['anomali_skoru'] - df_client['anomali_skoru'].min()) / rng
-            iso_w = 0.25 if rng > 0.5 else 0.15
-            s    += iso_n * (iso_w * 100)
-            agirliklar['iso'] = iso_w
+            iso_n     = ((-df_client["anomali_skoru"] - df_client["anomali_skoru"].min()) / rng * 100)
+            raw_w["iso"] = 0.25 if rng > 0.5 else 0.15
+        else:
+            raw_w["iso"] = 0.0
+    else:
+        raw_w["iso"] = 0.0
 
-    xgb_w  = agirliklar.get('xgb', 0)
-    kural_w = max(round(1 - xgb_w - iso_w, 3), 0.10)
-    kural_s = np.zeros(len(df_client))
-    if 'dark_web_oran'       in df_client.columns: kural_s += df_client['dark_web_oran']       * 0.50
-    if 'tx_hata_oran'        in df_client.columns: kural_s += df_client['tx_hata_oran']        * 0.20
-    if 'merchant_risk_max'   in df_client.columns: kural_s += df_client['merchant_risk_max']   * 0.15
-    if 'hata_ani_artis'      in df_client.columns: kural_s += df_client['hata_ani_artis'].clip(0,1) * 0.10
-    if 'tutar_degisim_7_30'  in df_client.columns:
-        kural_s += (df_client['tutar_degisim_7_30'] - 1).clip(0, 5) / 5 * 0.05
-    s += kural_s * (kural_w * 100)
+    raw_w["kural"] = max(0.10, 1.0 - raw_w["ml"] - raw_w["iso"])
 
-    print(f"  Ağırlıklar: XGB:{xgb_w:.0%}  ISO:{iso_w:.0%}  Kural:{kural_w:.0%}")
+    total = sum(raw_w.values())
+    w     = {k: v / total for k, v in raw_w.items()}
 
-    df_client['fraud_skoru'] = np.clip(s, 0, 100).round(2)
+    log.info("  Ağırlıklar — ML:%.0f%%  ISO:%.0f%%  Kural:%.0f%%",
+             w["ml"] * 100, w["iso"] * 100, w["kural"] * 100)
 
-    esik_yuksek  = float(df_client['fraud_skoru'].quantile(0.90))
-    esik_supheli = float(df_client['fraud_skoru'].quantile(0.75))
-    print(f"  Eşikler — Şüpheli:{esik_supheli:.1f}  Yüksek:{esik_yuksek:.1f}")
+    if w["ml"] > 0 and "fraud_skoru_xgb" in df_client.columns:
+        s += df_client["fraud_skoru_xgb"].values * w["ml"]
+    if w["iso"] > 0:
+        s += iso_n.values * w["iso"]
 
-    df_client['fraud_tahmini'] = pd.cut(
-        df_client['fraud_skoru'],
-        bins=[-np.inf, esik_supheli, esik_yuksek, np.inf],
-        labels=['Normal', 'Supheli', 'Yuksek Risk']
+    def _safe_get(col: str) -> pd.Series:
+        return df_client.get(col, pd.Series(0, index=df_client.index))
+
+    kural_s  = np.zeros(len(df_client))
+    kural_s += _safe_get("dark_web_oran").values    * 0.45
+    kural_s += _safe_get("tx_hata_oran").values     * 0.20
+    kural_s += _safe_get("islem_basina_hata").clip(0, 1).values * 0.15
+    kural_s += _safe_get("hata_ani_artis").clip(0, 1).values    * 0.10
+    kural_s += _safe_get("tx_zscore_oran").values   * 0.10
+    s += kural_s * (w["kural"] * 100)
+
+    df_client["fraud_skoru"] = np.clip(s, 0, 100).round(2)
+
+    q75 = float(df_client["fraud_skoru"].quantile(0.75))
+    q90 = float(df_client["fraud_skoru"].quantile(0.90))
+
+    log.info("  Eşikler — Şüpheli:%.1f  Yüksek:%.1f", q75, q90)
+    log.info("  Skor — mean:%.2f  std:%.2f  max:%.2f",
+             df_client["fraud_skoru"].mean(),
+             df_client["fraud_skoru"].std(),
+             df_client["fraud_skoru"].max())
+
+    df_client["fraud_tahmini"] = pd.cut(
+        df_client["fraud_skoru"],
+        bins=[-np.inf, q75, q90, np.inf],
+        labels=["Normal", "Supheli", "Yuksek Risk"],
     ).astype(str)
 
     return df_client
 
 
-# ══════════════════════════════════════════════════════════
-# 13. KAYIT
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# 9. KAYIT
+# ══════════════════════════════════════════════════════════════════════════════
 
-def save_results(df_client):
-    print("\n💾 Kaydediliyor...")
-    conn = sqlite3.connect(DB_PATH)
+SAVE_COLS = [
+    "client_id", "fraud_skoru", "fraud_tahmini",
+    "fraud_skoru_xgb", "anomali_skoru", "iso_tahmin",
+    "churn_skoru", "churn_tahmini",
+    "tx_gece_oran", "tx_hata_oran", "tx_zscore_oran", "tx_velocity_ort",
+    "dark_web_oran", "dark_web_kart",
+    "tx_islem_sayisi", "borc_gelir_orani", "dusuk_kredi",
+    "fraud_max_tx", "fraud_tx_sayisi", "risk_skoru",
+    "avg_transaction", "islem_basina_hata",
+    "son30_islem_sayisi", "son30_toplam_tutar",
+    "son7_islem_sayisi",  "son7_toplam_tutar",
+    "tutar_degisim_7_30", "islem_degisim_7_30",
+    "gece_ani_artis",     "hata_ani_artis",
+    "rfm_recency",        "rfm_frequency",      "rfm_monetary",
+    "shap_reason_1",      "shap_reason_2",       "shap_reason_3",
+    "shap_val_1",         "shap_val_2",           "shap_val_3",
+]
 
-    save_cols = [c for c in [
-        'client_id', 'fraud_skoru', 'fraud_tahmini',
-        'fraud_skoru_xgb', 'anomali_skoru', 'iso_tahmin',
-        'churn_skoru', 'churn_tahmini',
-        'tx_gece_oran', 'tx_hata_oran', 'dark_web_oran',
-        'tx_islem_sayisi', 'borc_gelir_orani',
-        'fraud_max_tx', 'fraud_tx_sayisi',
-        'risk_skoru',
-        'merchant_risk_ort', 'merchant_risk_max',
-        'velocity_1h_max', 'tutar_carpani_max',
-        'son30_islem_sayisi', 'son30_toplam_tutar',
-        'son30_gece_oran', 'son30_hata_oran',
-        'son7_islem_sayisi', 'son7_toplam_tutar',
-        'tutar_degisim_7_30', 'islem_degisim_7_30',
-        'gece_ani_artis', 'hata_ani_artis',
-        'rfm_skor', 'gun_fark',
-    ] if c in df_client.columns]
+
+def save_results(df_client: pd.DataFrame) -> dict:
+    _section("9. Kayıt")
+
+    save_cols = [c for c in SAVE_COLS if c in df_client.columns]
+    conn      = sqlite3.connect(DB_PATH)
 
     df_client[save_cols].to_sql("client_ml", conn, if_exists="replace", index=False)
-    print(f"  ✅ client_ml: {len(df_client):,} kayıt")
+    log.info("  client_ml: %d kayıt, %d sütun", len(df_client), len(save_cols))
 
     ozet = {
-        'toplam'          : int(len(df_client)),
-        'normal'          : int((df_client['fraud_tahmini'] == 'Normal').sum()),
-        'supheli'         : int((df_client['fraud_tahmini'] == 'Supheli').sum()),
-        'yuksek_risk'     : int((df_client['fraud_tahmini'] == 'Yuksek Risk').sum()),
-        'churn_yuksek'    : int((df_client.get('churn_tahmini', '') == 'Yuksek Risk').sum()),
-        'ort_fraud_skoru' : round(float(df_client['fraud_skoru'].mean()), 2),
-        'max_fraud_skoru' : round(float(df_client['fraud_skoru'].max()), 2),
-        'hesaplama_tarihi': datetime.now().isoformat(),
+        "toplam":           int(len(df_client)),
+        "normal":           int((df_client["fraud_tahmini"] == "Normal").sum()),
+        "supheli":          int((df_client["fraud_tahmini"] == "Supheli").sum()),
+        "yuksek_risk":      int((df_client["fraud_tahmini"] == "Yuksek Risk").sum()),
+        "churn_yuksek":     int((df_client.get("churn_tahmini", pd.Series()) == "Yuksek Risk").sum()),
+        "ort_fraud_skoru":  round(float(df_client["fraud_skoru"].mean()), 2),
+        "max_fraud_skoru":  round(float(df_client["fraud_skoru"].max()), 2),
+        "shap_aktif":       int("shap_reason_1" in df_client.columns),
+        "hesaplama_tarihi": datetime.now().isoformat(),
+        "pipeline_version": "7.0",
     }
     pd.DataFrame([ozet]).to_sql("ml_ozet", conn, if_exists="replace", index=False)
     conn.close()
-    print("  ✅ ml_ozet kaydedildi")
+
+    log.info("  ml_ozet kaydedildi.")
     return ozet
 
 
-# ══════════════════════════════════════════════════════════
-# 14. ANA FONKSİYON
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# 10. ANA PIPELINE
+# ══════════════════════════════════════════════════════════════════════════════
 
-def train_model():
-    print("\n" + "=" * 60)
-    print("🚀 FinSight — ML Pipeline v6.0")
-    print("=" * 60)
+def train_model() -> tuple[pd.DataFrame, dict]:
+    log.info("=" * 64)
+    log.info("  FinanceAI — ML Pipeline v7.0")
+    log.info("  XGBoost  : %s", XGB_AVAILABLE)
+    log.info("  LightGBM : %s", LGB_AVAILABLE)
+    log.info("  SHAP     : %s", SHAP_AVAILABLE)
+    log.info("  SMOTE    : %s", SMOTE_AVAILABLE)
+    log.info("=" * 64)
     t0 = datetime.now()
 
-    # İşlem verisi
+    # 1-2. Veri + model
     df_tx = load_transactions_with_labels()
     df_tx = add_client_context(df_tx)
+    df_tx, metrics, fcols, en_iyi_model = train_and_compare_models(df_tx)
 
-    # YENİ: Merchant risk + Velocity
-    df_tx = build_merchant_risk(df_tx)
-    df_tx = add_velocity_features(df_tx)
-
-    # Fraud modeli
-    df_tx, metrics, fcols, threshold = train_tx_fraud_model(df_tx)
-
-    # YENİ: SHAP (sample üzerinde)
-    sample_size = min(10_000, len(df_tx))
-    sample_idx  = df_tx.sample(sample_size, random_state=42).index
-    X_shap = df_tx.loc[sample_idx, [c for c in fcols if c in df_tx.columns]]
-    model  = joblib.load(f"{MODEL_PATH}/xgboost_fraud.pkl")
-    shap_result = compute_shap_explanations(model, X_shap, fcols)
-    if shap_result:
-        metrics['shap_global'] = shap_result.get('global', [])[:10]
-
-    # Müşteri bazına topla
+    # 3. Müşteri bazına topla
     df_client = aggregate_to_client(df_tx)
     del df_tx
     gc.collect()
+    log.info("  İşlem verisi RAM'den temizlendi.")
 
-    # Kullanıcı + kart özellikleri
-    print("\n🔗 Profil zenginleştiriliyor...")
-    try:
-        user = build_user_features()
-        df_client = df_client.merge(user, on='client_id', how='left')
-    except Exception as e:
-        print(f"  ⚠️  User: {e}")
-    try:
-        card = build_card_features()
-        df_client = df_client.merge(card, on='client_id', how='left', suffixes=('', '_card'))
-    except Exception as e:
-        print(f"  ⚠️  Card: {e}")
+    # 4. Zenginleştirme
+    _section("4. Profil zenginleştirme")
+    user      = build_user_features()
+    card      = build_card_features()
+    df_client = df_client.merge(user, on="client_id", how="left")
+    df_client = df_client.merge(card, on="client_id", how="left", suffixes=("", "_card"))
     df_client = df_client.fillna(0)
+    df_client = enrich_with_db_features(df_client)
 
-    # Tüm müşteriler
-    df_client = enrich_with_all_clients(df_client)
-
-    # Modeller
+    # 5. Anomali
     df_client = train_isolation_forest(df_client)
+
+    # 6. Churn
     df_client = build_churn_labels(df_client)
     df_client, cm = train_churn_model(df_client)
     metrics.update(cm)
 
-    # Final skor
+    # 7. SHAP (client düzeyinde)
+    _section("8. SHAP açıklamaları")
+    df_client = compute_shap_explanations(df_client, fcols)
+
+    # 8. Final skor
     df_client = compute_final_fraud_score(df_client)
+
+    # 9. Kaydet
     ozet = save_results(df_client)
 
-    # Metrikleri güncelle
-    with open(f"{MODEL_PATH}/model_metrics.json", 'w', encoding='utf-8') as f:
-        json.dump(metrics, f, ensure_ascii=False, indent=2)
+    sure = int((datetime.now() - t0).total_seconds())
+    log.info("")
+    log.info("=" * 64)
+    log.info("  SONUÇ — v7.0")
+    log.info("=" * 64)
+    log.info("  Kazanan Model  : %s", en_iyi_model)
+    log.info("  AUC-ROC        : %.4f", metrics.get("auc_roc", 0))
+    log.info("  Avg Precision  : %.4f", metrics.get("average_precision", 0))
+    log.info("  Churn AUC      : %.4f", metrics.get("churn_auc", 0))
+    log.info("  Toplam müşteri : %d", ozet["toplam"])
+    log.info("  Normal         : %d  (%.1f%%)",
+             ozet["normal"],      ozet["normal"]      / max(ozet["toplam"], 1) * 100)
+    log.info("  Şüpheli        : %d  (%.1f%%)",
+             ozet["supheli"],     ozet["supheli"]     / max(ozet["toplam"], 1) * 100)
+    log.info("  Yüksek Risk    : %d  (%.1f%%)",
+             ozet["yuksek_risk"], ozet["yuksek_risk"] / max(ozet["toplam"], 1) * 100)
+    log.info("  SHAP aktif     : %s", bool(ozet.get("shap_aktif")))
+    log.info("  Süre           : %ds", sure)
+    log.info("=" * 64)
 
-    sure = (datetime.now() - t0).seconds
-    print("\n" + "=" * 60)
-    print("📊 SONUÇ")
-    print("=" * 60)
-    print(f"  Toplam   : {ozet['toplam']:,}")
-    print(f"  Normal   : {ozet['normal']:,}  (%{ozet['normal']/ozet['toplam']*100:.1f})")
-    print(f"  Supheli  : {ozet['supheli']:,}  (%{ozet['supheli']/ozet['toplam']*100:.1f})")
-    print(f"  Yuk.Risk : {ozet['yuksek_risk']:,}  (%{ozet['yuksek_risk']/ozet['toplam']*100:.1f})")
-    print(f"  Churn    : {ozet['churn_yuksek']:,}")
-    print(f"  AUC-ROC  : {metrics.get('auc_roc', 'N/A')}")
-    print(f"  F1 Skoru : {metrics.get('f1_skoru', 'N/A')}")
-    print(f"  Süre     : {sure}s")
-    print("=" * 60)
-    print("✅ Tüm modeller hazır!")
     return df_client, metrics
 
 
-# ══════════════════════════════════════════════════════════
-# YARDIMCI — api.py tarafından kullanılır
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# YARDIMCI — sorgulama
+# ══════════════════════════════════════════════════════════════════════════════
 
 def predict_client(client_id: int) -> dict:
+    """Tek müşterinin ML sonuçlarını döner."""
+    if not DB_PATH.exists():
+        return {}
     conn = sqlite3.connect(DB_PATH)
-    df   = pd.read_sql(f"SELECT * FROM client_ml WHERE client_id={client_id}", conn)
+    df   = pd.read_sql(
+        "SELECT * FROM client_ml WHERE client_id = ?", conn, params=(client_id,)
+    )
     conn.close()
-    return df.iloc[0].to_dict() if len(df) else {}
+    return df.iloc[0].to_dict() if not df.empty else {}
 
 
 def get_all_ml_results() -> pd.DataFrame:
+    """Tüm müşterileri fraud skoruna göre sıralı döner."""
+    if not DB_PATH.exists():
+        return pd.DataFrame()
     conn = sqlite3.connect(DB_PATH)
     try:
         df = pd.read_sql("SELECT * FROM client_ml ORDER BY fraud_skoru DESC", conn)
@@ -1097,11 +1292,12 @@ def get_all_ml_results() -> pd.DataFrame:
 
 
 def get_model_metrics() -> dict:
-    p = f"{MODEL_PATH}/model_metrics.json"
-    if os.path.exists(p):
-        with open(p, encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+    """En son eğitimin metriklerini döner."""
+    p = MODEL_PATH / "model_metrics.json"
+    if not p.exists():
+        return {}
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
 
 
 if __name__ == "__main__":
