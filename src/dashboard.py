@@ -11,6 +11,10 @@ Düzeltilen sorunlar:
 8. segment pd.cut kategorik tip uyumu
 9. adapt_real_data robust hale getirildi
 10. PL() fonksiyonu conflict düzeltildi
+FONT UPDATE v5.3.1:
+- Syne → Inter (başlıklar)
+- DM Mono → JetBrains Mono (kod/mono)
+- DM Sans → Plus Jakarta Sans (body)
 """
 
 import streamlit as st
@@ -126,11 +130,12 @@ ORANGE = "#FF6B35"
 PURPLE = "#8B5CF6"
 
 # ═══════════════════════════════════════════
-# CSS
+# CSS — FONT GÜNCELLENDİ
+# Inter / JetBrains Mono / Plus Jakarta Sans
 # ═══════════════════════════════════════════
 st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@300;400;500&family=Plus+Jakarta+Sans:wght@300;400;500;600&display=swap');
 
 :root {{
     --bg-base:{T['bg_base']}; --bg-card:{T['bg_card']}; --bg-card2:{T['bg_card2']};
@@ -142,7 +147,7 @@ st.markdown(f"""
 html,body,[class*="css"] {{
     background-color:var(--bg-base) !important;
     color:var(--text-primary) !important;
-    font-family:'DM Sans',sans-serif !important;
+    font-family:'Plus Jakarta Sans',sans-serif !important;
 }}
 section[data-testid="stSidebar"] {{
     background:{T['sidebar_bg']} !important;
@@ -160,12 +165,12 @@ section[data-testid="stSidebar"] * {{ color:var(--text-primary) !important; }}
     border-color:var(--border-bright) !important; transform:translateY(-2px) !important;
 }}
 [data-testid="stMetricValue"] {{
-    font-family:'Syne',sans-serif !important; font-size:1.8rem !important;
+    font-family:'Inter',sans-serif !important; font-size:1.8rem !important;
     font-weight:800 !important;
     color:{"#C9A84C" if st.session_state.dark_mode else "#8B6820"} !important;
 }}
 [data-testid="stMetricLabel"] {{
-    font-family:'DM Mono',monospace !important; font-size:.62rem !important;
+    font-family:'JetBrains Mono',monospace !important; font-size:.62rem !important;
     color:var(--text-muted) !important; text-transform:uppercase !important;
     letter-spacing:.18em !important;
 }}
@@ -175,7 +180,7 @@ section[data-testid="stSidebar"] * {{ color:var(--text-primary) !important; }}
 }}
 .stTabs [data-baseweb="tab"] {{
     background:transparent !important; color:var(--text-muted) !important;
-    font-family:'DM Mono',monospace !important; font-size:.7rem !important;
+    font-family:'JetBrains Mono',monospace !important; font-size:.7rem !important;
     text-transform:uppercase !important; letter-spacing:.1em !important;
     border-radius:7px !important; border:none !important; padding:7px 14px !important;
 }}
@@ -187,7 +192,7 @@ div[data-testid="stRadio"]>label {{ display:none; }}
 div[data-testid="stRadio"]>div {{ display:flex; flex-direction:column; gap:1px; }}
 div[data-testid="stRadio"]>div>label {{
     display:flex !important; align-items:center; padding:9px 12px !important;
-    border-radius:8px !important; font-family:'DM Sans',sans-serif !important;
+    border-radius:8px !important; font-family:'Plus Jakarta Sans',sans-serif !important;
     font-size:.82rem !important; color:var(--text-muted) !important; cursor:pointer;
     transition:all .15s ease; border:1px solid transparent; margin:0 !important;
 }}
@@ -205,7 +210,7 @@ div[data-testid="stRadio"]>div>label>div:first-child {{ display:none !important;
 .stButton>button {{
     background:linear-gradient(135deg,{GOLD},#A07830) !important;
     color:#06090F !important; border:none !important; border-radius:8px !important;
-    font-family:'Syne',sans-serif !important; font-weight:700 !important;
+    font-family:'Inter',sans-serif !important; font-weight:700 !important;
     letter-spacing:.04em !important; padding:8px 20px !important;
     transition:all .2s !important; box-shadow:0 2px 12px rgba(201,168,76,.2) !important;
 }}
@@ -238,7 +243,7 @@ div[data-testid="stRadio"]>div>label>div:first-child {{ display:none !important;
 .btn-dim>button {{
     background:rgba(201,168,76,.08) !important; color:{GOLD} !important;
     border:1px solid rgba(201,168,76,.2) !important; box-shadow:none !important;
-    font-size:.78rem !important; font-family:'DM Mono',monospace !important;
+    font-size:.78rem !important; font-family:'JetBrains Mono',monospace !important;
 }}
 .btn-dim>button:hover {{
     background:rgba(201,168,76,.14) !important;
@@ -286,14 +291,14 @@ def section_header(title, subtitle="", g1=None, g2=None):
     first = parts[0] if parts else ""
     rest  = " ".join(parts[1:]) if len(parts) > 1 else ""
     sub   = (
-        f"<div style='font-family:DM Mono;font-size:.68rem;color:{T['text_muted']};"
+        f"<div style='font-family:JetBrains Mono;font-size:.68rem;color:{T['text_muted']};"
         f"letter-spacing:.12em;margin-top:8px;text-transform:uppercase;'>{subtitle}</div>"
         if subtitle else ""
     )
     return f"""
     <div style='margin-bottom:28px;'>
-        <div style='font-family:Syne;font-size:1.85rem;font-weight:800;margin:0;
-                    letter-spacing:-.02em;line-height:1.15;'>
+        <div style='font-family:Inter;font-size:1.85rem;font-weight:800;margin:0;
+                    letter-spacing:-.03em;line-height:1.15;'>
             <span style='color:{c1};'>{first} </span>
             <span style='color:{c2};'>{rest}</span>
         </div>
@@ -314,9 +319,9 @@ def _hmetric(label, value, color=None):
     return (
         f"<div style='background:linear-gradient(135deg,{T['bg_card']},{T['bg_card2']});"
         f"border:1px solid {T['border']};border-radius:14px;padding:18px 20px;'>"
-        f"<div style='font-family:DM Mono;font-size:.58rem;color:{T['text_muted']};"
+        f"<div style='font-family:JetBrains Mono;font-size:.58rem;color:{T['text_muted']};"
         f"text-transform:uppercase;letter-spacing:.18em;margin-bottom:8px;'>{label}</div>"
-        f"<div style='font-family:Syne;font-size:1.8rem;font-weight:800;color:{c};'>{value}</div>"
+        f"<div style='font-family:Inter;font-size:1.8rem;font-weight:800;color:{c};'>{value}</div>"
         f"</div>"
     )
 
@@ -326,32 +331,32 @@ def plotly_layout(**kw):
     base = dict(
         paper_bgcolor = 'rgba(0,0,0,0)',
         plot_bgcolor  = T['plot_bg'],
-        font          = dict(family='DM Sans', color=T['text_secondary'], size=11),
-        title_font    = dict(family='Syne', size=14, color=T['text_primary']),
+        font          = dict(family='Plus Jakarta Sans', color=T['text_secondary'], size=11),
+        title_font    = dict(family='Inter', size=14, color=T['text_primary']),
         colorway      = [GOLD, CYAN, GREEN, RED, ORANGE, PURPLE],
         xaxis = dict(
             gridcolor = 'rgba(90,106,122,.12)',
             linecolor = 'rgba(90,106,122,.15)',
-            tickfont  = dict(family='DM Mono', size=9, color=T['text_muted']),
+            tickfont  = dict(family='JetBrains Mono', size=9, color=T['text_muted']),
             zeroline  = False,
         ),
         yaxis = dict(
             gridcolor = 'rgba(90,106,122,.12)',
             linecolor = 'rgba(90,106,122,.15)',
-            tickfont  = dict(family='DM Mono', size=9, color=T['text_muted']),
+            tickfont  = dict(family='JetBrains Mono', size=9, color=T['text_muted']),
             zeroline  = False,
         ),
         legend = dict(
             bgcolor     = T['bg_card'],
             bordercolor = T['border'],
             borderwidth = 1,
-            font        = dict(family='DM Mono', size=9, color=T['text_secondary']),
+            font        = dict(family='JetBrains Mono', size=9, color=T['text_secondary']),
         ),
         margin     = dict(l=40, r=20, t=50, b=40),
         hoverlabel = dict(
             bgcolor     = T['bg_card'],
             bordercolor = 'rgba(201,168,76,.3)',
-            font        = dict(family='DM Mono', size=11, color=T['text_primary']),
+            font        = dict(family='JetBrains Mono', size=11, color=T['text_primary']),
         ),
     )
     base.update(kw)
@@ -409,16 +414,16 @@ def show_auth_page():
                     border:1px solid rgba(255,107,53,.35);
                     border-left:4px solid {ORANGE};
                     border-radius:14px;padding:24px 28px;'>
-            <div style='font-family:Syne;font-size:1.1rem;font-weight:800;
+            <div style='font-family:Inter;font-size:1.1rem;font-weight:800;
                         color:{ORANGE};margin-bottom:10px;'>Kurulum Gerekli</div>
-            <div style='font-family:DM Mono;font-size:.72rem;
+            <div style='font-family:JetBrains Mono;font-size:.72rem;
                         color:{T['text_secondary']};line-height:2;'>
                 Henuz yonetici hesabi olusturulmadi.<br>
                 Terminalde calistirin:
             </div>
             <div style='background:rgba(0,0,0,.3);border-radius:8px;
                         padding:12px 16px;margin-top:12px;
-                        font-family:DM Mono;font-size:.8rem;
+                        font-family:JetBrains Mono;font-size:.8rem;
                         color:{CYAN};letter-spacing:.05em;'>
                 python setup.py
             </div>
@@ -431,12 +436,12 @@ def show_auth_page():
         st.markdown(f"""
         <div style='text-align:center;padding:36px 0 24px 0;animation:fadeIn .5s ease;'>
             <div style='font-size:2.2rem;margin-bottom:8px;'>💎</div>
-            <div style='font-family:Syne;font-size:2rem;font-weight:800;
+            <div style='font-family:Inter;font-size:2rem;font-weight:800;
                         background:linear-gradient(135deg,{GOLD},#FFE4A0);
                         -webkit-background-clip:text;-webkit-text-fill-color:transparent;'>
                 FinSight
             </div>
-            <div style='font-family:DM Mono;font-size:.58rem;color:{T['text_muted']};
+            <div style='font-family:JetBrains Mono;font-size:.58rem;color:{T['text_muted']};
                         letter-spacing:.22em;text-transform:uppercase;margin-top:4px;'>
                 Analiz Sistemi
             </div>
@@ -692,10 +697,10 @@ with st.sidebar:
     st.markdown(f"""
     <div style='text-align:center;padding:16px 0 14px 0;'>
         <div style='font-size:1.2rem;margin-bottom:4px;'>💎</div>
-        <div style='font-family:Syne;font-size:1.2rem;font-weight:800;
+        <div style='font-family:Inter;font-size:1.2rem;font-weight:800;
                     background:linear-gradient(135deg,{GOLD},#FFE4A0);
                     -webkit-background-clip:text;-webkit-text-fill-color:transparent;'>FinSight</div>
-        <div style='font-family:DM Mono;font-size:.5rem;color:{T['text_muted']};
+        <div style='font-family:JetBrains Mono;font-size:.5rem;color:{T['text_muted']};
                     letter-spacing:.2em;text-transform:uppercase;margin-top:2px;'>
             v5.3 — {current_role.upper()}
         </div>
@@ -723,9 +728,9 @@ with st.sidebar:
         <div style='display:flex;align-items:center;gap:9px;'>
             <div style='font-size:1.2rem;'>{st.session_state.avatar}</div>
             <div>
-                <div style='font-family:Syne;font-size:.82rem;font-weight:700;
+                <div style='font-family:Inter;font-size:.82rem;font-weight:700;
                             color:{T['text_primary']};'>{st.session_state.display_name}</div>
-                <div style='font-family:DM Mono;font-size:.55rem;color:{role_color};
+                <div style='font-family:JetBrains Mono;font-size:.55rem;color:{role_color};
                             text-transform:uppercase;letter-spacing:.12em;'>
                     {current_role}{p_badge}
                 </div>
@@ -739,20 +744,20 @@ with st.sidebar:
 
     st.markdown(f"""
     <div style='padding:0 4px 8px 4px;'>
-        <div style='font-family:DM Mono;font-size:.57rem;color:{T['text_muted']};
+        <div style='font-family:JetBrains Mono;font-size:.57rem;color:{T['text_muted']};
                     display:flex;align-items:center;gap:6px;margin-bottom:3px;'>
             <span style='width:5px;height:5px;border-radius:50%;background:{GREEN};
                          display:inline-block;box-shadow:0 0 5px {GREEN};'></span>
             {data_source}
         </div>
-        <div style='font-family:DM Mono;font-size:.57rem;color:{T['text_muted']};
+        <div style='font-family:JetBrains Mono;font-size:.57rem;color:{T['text_muted']};
                     display:flex;align-items:center;gap:6px;margin-bottom:3px;'>
             <span style='width:5px;height:5px;border-radius:50%;
                          background:{"#00E396" if API_ALIVE else "#FF4560"};
                          display:inline-block;'></span>
             {api_status}
         </div>
-        <div style='font-family:DM Mono;font-size:.57rem;color:{T["text_muted"]};
+        <div style='font-family:JetBrains Mono;font-size:.57rem;color:{T["text_muted"]};
                     display:flex;align-items:center;gap:6px;'>
             <span style='width:5px;height:5px;border-radius:50%;
                          background:{"#00E396" if ml_ok else "#FF6B35"};
@@ -764,7 +769,7 @@ with st.sidebar:
 
     st.markdown(hr(), unsafe_allow_html=True)
     st.markdown(
-        f"<div style='font-family:DM Mono;font-size:.5rem;color:{T['text_muted']};"
+        f"<div style='font-family:JetBrains Mono;font-size:.5rem;color:{T['text_muted']};"
         f"text-transform:uppercase;letter-spacing:.2em;margin-bottom:6px;padding:0 4px;'>Navigasyon</div>",
         unsafe_allow_html=True
     )
@@ -776,7 +781,7 @@ with st.sidebar:
 
     if current_role in ["admin", "analyst"]:
         st.markdown(
-            f"<div style='font-family:DM Mono;font-size:.5rem;color:{T['text_muted']};"
+            f"<div style='font-family:JetBrains Mono;font-size:.5rem;color:{T['text_muted']};"
             f"text-transform:uppercase;letter-spacing:.2em;margin-bottom:6px;padding:0 4px;'>Filtreler</div>",
             unsafe_allow_html=True
         )
@@ -797,7 +802,7 @@ with st.sidebar:
         df = df_main.copy()
 
     st.markdown(f"""
-    <div style='font-family:DM Mono;font-size:.58rem;color:{T['text_muted']};
+    <div style='font-family:JetBrains Mono;font-size:.58rem;color:{T['text_muted']};
                 margin-top:6px;padding:6px 10px;background:rgba(201,168,76,.06);
                 border-radius:8px;border:1px solid rgba(201,168,76,.1);'>
         <span style='color:{GOLD};font-weight:600;'>{len(df):,}</span> musteri secildi
@@ -897,10 +902,10 @@ if sayfa == "📊 Overview":
         fig_risk = go.Figure(go.Pie(
             labels=labels, values=values, hole=.62,
             marker=dict(colors=colors, line=dict(color=T['bg_base'], width=2)),
-            textfont=dict(family='DM Mono', size=10)
+            textfont=dict(family='JetBrains Mono', size=10)
         ))
         fig_risk.add_annotation(text=f"<b>{sum(values):,}</b>", x=.5, y=.5,
-            showarrow=False, font=dict(family='Syne', size=22, color=GOLD))
+            showarrow=False, font=dict(family='Inter', size=22, color=GOLD))
         _pl2 = plotly_layout()
         _pl2['margin'] = dict(l=10, r=10, t=45, b=10)
         fig_risk.update_layout(title="🔥 Risk Distribution (ML)", height=240, **_pl2)
@@ -980,9 +985,9 @@ elif sayfa == "💎 Segments":
     with c1:
         fig = go.Figure(go.Pie(labels=seg.index, values=seg.values, hole=.62,
             marker=dict(colors=[GOLD, CYAN, GREEN, RED], line=dict(color=T['bg_base'], width=2)),
-            textfont=dict(family='DM Mono', size=11)))
+            textfont=dict(family='JetBrains Mono', size=11)))
         fig.add_annotation(text=f"<b>{len(df):,}</b>", x=.5, y=.5, showarrow=False,
-            font=dict(family='Syne', size=28, color=GOLD))
+            font=dict(family='Inter', size=28, color=GOLD))
         fig.update_layout(title="💎 Segment Distribution", height=500, **plotly_layout())
         st.plotly_chart(fig, use_container_width=True)
     with c2:
@@ -994,7 +999,7 @@ elif sayfa == "💎 Segments":
         fig2 = go.Figure(go.Bar(x=seg_df['segment'], y=seg_df['musteri'],
             marker=dict(color=[GOLD, CYAN, GREEN, RED]),
             text=seg_df['musteri'], textposition='outside',
-            textfont=dict(family='DM Mono', size=10, color=T['text_secondary'])))
+            textfont=dict(family='JetBrains Mono', size=10, color=T['text_secondary'])))
         fig2.update_layout(title="👥 Customers by Segment", height=500, **plotly_layout())
         st.plotly_chart(fig2, use_container_width=True)
 
@@ -1007,7 +1012,7 @@ elif sayfa == "📂 Category Averages":
         marker=dict(color=list(range(len(top))),
                     colorscale=[[0, 'rgba(201,168,76,.25)'], [1, GOLD]]),
         text=[f'${v/1000:.0f}K' for v in top['toplam_harcama']], textposition='outside',
-        textfont=dict(family='DM Mono', size=10, color=T['text_secondary'])))
+        textfont=dict(family='JetBrains Mono', size=10, color=T['text_secondary'])))
     fig.update_layout(title="📂 Average Spending by Category", height=560, **plotly_layout())
     st.plotly_chart(fig, use_container_width=True)
 
@@ -1072,7 +1077,7 @@ elif sayfa == "📈 Trend Analysis":
             st.plotly_chart(fig, use_container_width=True)
         with c2:
             fig2 = go.Figure(go.Pie(labels=dk['kategori'], values=dk['toplam'], hole=.4,
-                textfont=dict(family='DM Mono', size=9),
+                textfont=dict(family='JetBrains Mono', size=9),
                 marker=dict(line=dict(color=T['bg_base'], width=2))))
             fig2.update_layout(title="🥧 Distribution", height=380, **plotly_layout())
             st.plotly_chart(fig2, use_container_width=True)
@@ -1212,7 +1217,7 @@ elif sayfa == "⚠️ Risk & Fraud":
             ))
             fraud_pct = round((supheli + yuksek) / max(toplam, 1) * 100, 1)
             fig2.add_annotation(text=f"<b>{fraud_pct}%</b>", x=.5, y=.5,
-                showarrow=False, font=dict(family='Syne', size=16, color=RED))
+                showarrow=False, font=dict(family='Inter', size=16, color=RED))
             fig2.update_layout(title="🎯 Risk Distribution", height=380, **plotly_layout())
             st.plotly_chart(fig2, use_container_width=True)
 
@@ -1225,7 +1230,7 @@ elif sayfa == "⚠️ Risk & Fraud":
                 marker=dict(color=yr['fraud_skoru'].head(20),
                             colorscale=[[0, ORANGE], [1, RED]], showscale=False),
                 text=yr['fraud_skoru'].head(20).round(1), textposition='outside',
-                textfont=dict(family='DM Mono', size=9)
+                textfont=dict(family='JetBrains Mono', size=9)
             ))
             fig.update_layout(title="🚨 Top 20 High Risk Customers (ML Score)",
                 height=340, **plotly_layout())
@@ -1317,7 +1322,7 @@ elif sayfa == "🗺️ Geographic Analysis":
                 [0, 'rgba(0,227,150,.8)'], [.5, 'rgba(255,107,53,.8)'], [1, 'rgba(255,69,96,.8)']])
         fig.update_layout(title="🗺️ Total Volume",
             paper_bgcolor='rgba(0,0,0,0)',
-            font=dict(family='DM Sans', color=T['text_primary']),
+            font=dict(family='Plus Jakarta Sans', color=T['text_primary']),
             margin=dict(l=10, r=10, t=50, b=10), height=520)
         st.plotly_chart(fig, use_container_width=True)
 
@@ -1346,36 +1351,36 @@ elif sayfa == "🤖 AI Insights":
             <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px;'>
                 <div style='background:linear-gradient(135deg,{T["bg_card"]},{T["bg_card2"]});
                             border:1px solid {auc_c}44;border-radius:14px;padding:20px 22px;'>
-                    <div style='font-family:DM Mono;font-size:.55rem;color:{T["text_muted"]};
+                    <div style='font-family:JetBrains Mono;font-size:.55rem;color:{T["text_muted"]};
                                 text-transform:uppercase;letter-spacing:.15em;margin-bottom:6px;'>AUC-ROC</div>
-                    <div style='font-family:Syne;font-size:2.2rem;font-weight:800;color:{auc_c};'>{auc:.2f}</div>
+                    <div style='font-family:Inter;font-size:2.2rem;font-weight:800;color:{auc_c};'>{auc:.2f}</div>
                     <div style='width:100%;background:{T["border"]};height:4px;border-radius:4px;margin-top:10px;'>
                         <div style='width:{auc*100:.0f}%;background:{auc_c};height:100%;border-radius:4px;'></div>
                     </div>
                 </div>
                 <div style='background:linear-gradient(135deg,{T["bg_card"]},{T["bg_card2"]});
                             border:1px solid {GOLD}33;border-radius:14px;padding:20px 22px;'>
-                    <div style='font-family:DM Mono;font-size:.55rem;color:{T["text_muted"]};
+                    <div style='font-family:JetBrains Mono;font-size:.55rem;color:{T["text_muted"]};
                                 text-transform:uppercase;letter-spacing:.15em;margin-bottom:6px;'>F1 Score</div>
-                    <div style='font-family:Syne;font-size:2.2rem;font-weight:800;color:{GOLD};'>{f1*100:.1f}%</div>
+                    <div style='font-family:Inter;font-size:2.2rem;font-weight:800;color:{GOLD};'>{f1*100:.1f}%</div>
                     <div style='width:100%;background:{T["border"]};height:4px;border-radius:4px;margin-top:10px;'>
                         <div style='width:{f1*100:.0f}%;background:{GOLD};height:100%;border-radius:4px;'></div>
                     </div>
                 </div>
                 <div style='background:linear-gradient(135deg,{T["bg_card"]},{T["bg_card2"]});
                             border:1px solid {CYAN}33;border-radius:14px;padding:20px 22px;'>
-                    <div style='font-family:DM Mono;font-size:.55rem;color:{T["text_muted"]};
+                    <div style='font-family:JetBrains Mono;font-size:.55rem;color:{T["text_muted"]};
                                 text-transform:uppercase;letter-spacing:.15em;margin-bottom:6px;'>Precision</div>
-                    <div style='font-family:Syne;font-size:2.2rem;font-weight:800;color:{CYAN};'>{prec*100:.1f}%</div>
+                    <div style='font-family:Inter;font-size:2.2rem;font-weight:800;color:{CYAN};'>{prec*100:.1f}%</div>
                     <div style='width:100%;background:{T["border"]};height:4px;border-radius:4px;margin-top:10px;'>
                         <div style='width:{prec*100:.0f}%;background:{CYAN};height:100%;border-radius:4px;'></div>
                     </div>
                 </div>
                 <div style='background:linear-gradient(135deg,{T["bg_card"]},{T["bg_card2"]});
                             border:1px solid {ORANGE}33;border-radius:14px;padding:20px 22px;'>
-                    <div style='font-family:DM Mono;font-size:.55rem;color:{T["text_muted"]};
+                    <div style='font-family:JetBrains Mono;font-size:.55rem;color:{T["text_muted"]};
                                 text-transform:uppercase;letter-spacing:.15em;margin-bottom:6px;'>Recall</div>
-                    <div style='font-family:Syne;font-size:2.2rem;font-weight:800;color:{ORANGE};'>{rec*100:.1f}%</div>
+                    <div style='font-family:Inter;font-size:2.2rem;font-weight:800;color:{ORANGE};'>{rec*100:.1f}%</div>
                     <div style='width:100%;background:{T["border"]};height:4px;border-radius:4px;margin-top:10px;'>
                         <div style='width:{rec*100:.0f}%;background:{ORANGE};height:100%;border-radius:4px;'></div>
                     </div>
@@ -1415,7 +1420,7 @@ elif sayfa == "🤖 AI Insights":
                         y=['Real: Normal', 'Real: Fraud'],
                         colorscale=[[0, T['bg_card']], [1, GOLD]],
                         text=z_text, texttemplate='%{text}',
-                        textfont=dict(family='DM Mono', size=12, color=T['text_primary']),
+                        textfont=dict(family='JetBrains Mono', size=12, color=T['text_primary']),
                         showscale=False
                     ))
                     fig2.update_layout(title="📋 Confusion Matrix", height=380, **plotly_layout())
@@ -1426,20 +1431,20 @@ elif sayfa == "🤖 AI Insights":
                         border:1px solid {T["border"]};border-radius:14px;padding:20px 24px;margin-top:8px;'>
                 <div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:20px;'>
                     <div>
-                        <div style='font-family:DM Mono;font-size:.55rem;color:{T["text_muted"]};margin-bottom:6px;'>MODEL</div>
-                        <div style='font-family:Syne;font-size:.95rem;font-weight:700;color:{GOLD};'>{metrics.get("model","XGBoost")}</div>
+                        <div style='font-family:JetBrains Mono;font-size:.55rem;color:{T["text_muted"]};margin-bottom:6px;'>MODEL</div>
+                        <div style='font-family:Inter;font-size:.95rem;font-weight:700;color:{GOLD};'>{metrics.get("model","XGBoost")}</div>
                     </div>
                     <div>
-                        <div style='font-family:DM Mono;font-size:.55rem;color:{T["text_muted"]};margin-bottom:6px;'>TRAINING DATA</div>
-                        <div style='font-family:Syne;font-size:.95rem;font-weight:700;color:{CYAN};'>{metrics.get("toplam_ornek",0):,}</div>
+                        <div style='font-family:JetBrains Mono;font-size:.55rem;color:{T["text_muted"]};margin-bottom:6px;'>TRAINING DATA</div>
+                        <div style='font-family:Inter;font-size:.95rem;font-weight:700;color:{CYAN};'>{metrics.get("toplam_ornek",0):,}</div>
                     </div>
                     <div>
-                        <div style='font-family:DM Mono;font-size:.55rem;color:{T["text_muted"]};margin-bottom:6px;'>ACCURACY</div>
-                        <div style='font-family:Syne;font-size:.95rem;font-weight:700;color:{GREEN};'>{acc*100:.1f}%</div>
+                        <div style='font-family:JetBrains Mono;font-size:.55rem;color:{T["text_muted"]};margin-bottom:6px;'>ACCURACY</div>
+                        <div style='font-family:Inter;font-size:.95rem;font-weight:700;color:{GREEN};'>{acc*100:.1f}%</div>
                     </div>
                     <div>
-                        <div style='font-family:DM Mono;font-size:.55rem;color:{T["text_muted"]};margin-bottom:6px;'>TRAINED</div>
-                        <div style='font-family:Syne;font-size:.95rem;font-weight:700;color:{T["text_primary"]};'>{str(metrics.get("egitim_tarihi",""))[:10]}</div>
+                        <div style='font-family:JetBrains Mono;font-size:.55rem;color:{T["text_muted"]};margin-bottom:6px;'>TRAINED</div>
+                        <div style='font-family:Inter;font-size:.95rem;font-weight:700;color:{T["text_primary"]};'>{str(metrics.get("egitim_tarihi",""))[:10]}</div>
                     </div>
                 </div>
             </div>
@@ -1467,21 +1472,21 @@ elif sayfa == "🤖 AI Insights":
                             padding:14px 18px;margin:8px 0;
                             border:1px solid rgba(255,69,96,.12);'>
                     <div style='display:flex;justify-content:space-between;margin-bottom:8px;'>
-                        <span style='font-family:Syne;font-weight:700;
+                        <span style='font-family:Inter;font-weight:700;
                                      color:{T["text_primary"]};font-size:.95rem;'>
                             Musteri #{int(row.get("client_id", i))}
                         </span>
-                        <span style='font-family:DM Mono;font-size:.65rem;color:{bc};
+                        <span style='font-family:JetBrains Mono;font-size:.65rem;color:{bc};
                                      background:{bc}18;padding:2px 10px;
                                      border-radius:20px;border:1px solid {bc}40;'>{sev}</span>
                     </div>
                     <div style='display:flex;gap:16px;margin-bottom:8px;'>
                         <div>
-                            <div style='font-family:DM Mono;font-size:.55rem;color:{T["text_muted"]};'>FRAUD SKOR</div>
-                            <div style='font-family:Syne;font-size:1.3rem;font-weight:800;color:{bc};'>{fs:.1f}</div>
+                            <div style='font-family:JetBrains Mono;font-size:.55rem;color:{T["text_muted"]};'>FRAUD SKOR</div>
+                            <div style='font-family:Inter;font-size:1.3rem;font-weight:800;color:{bc};'>{fs:.1f}</div>
                         </div>
                     </div>
-                    <div style='font-family:DM Mono;font-size:.62rem;
+                    <div style='font-family:JetBrains Mono;font-size:.62rem;
                                 color:{T["text_muted"]};line-height:1.7;'>
                         {sig_html}
                     </div>
@@ -1535,7 +1540,7 @@ elif sayfa == "🤖 AI Insights":
                         ),
                         text=[f"{v:.3f}" for v in fi_top['importance']],
                         textposition='outside',
-                        textfont=dict(family='DM Mono', size=9, color=T['text_secondary'])
+                        textfont=dict(family='JetBrains Mono', size=9, color=T['text_secondary'])
                     ))
                     fig.update_layout(
                         title="Feature Importance (XGBoost)",
@@ -1657,36 +1662,36 @@ elif sayfa == "👤 Customer Detail":
         <div style='background:linear-gradient(135deg,{T["bg_card"]},{T["bg_card2"]});
                     border:1px solid {T["border"]};border-radius:16px;
                     padding:24px 28px;margin-bottom:20px;'>
-            <div style='font-family:DM Mono;font-size:.6rem;color:{T["text_muted"]};
+            <div style='font-family:JetBrains Mono;font-size:.6rem;color:{T["text_muted"]};
                         text-transform:uppercase;letter-spacing:.15em;margin-bottom:16px;'>
                 ML Tahmin Ozeti — Musteri #{secili}
             </div>
             <div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:20px;'>
                 <div>
-                    <div style='font-family:DM Mono;font-size:.58rem;color:{T["text_muted"]};margin-bottom:6px;'>FRAUD TAHMIN</div>
-                    <div style='font-family:Syne;font-size:1rem;font-weight:800;color:{fraud_c};'>{fraud_t}</div>
-                    <div style='font-family:DM Mono;font-size:.75rem;color:{fraud_c};margin-top:4px;'>Skor: {fs:.1f}/100</div>
+                    <div style='font-family:JetBrains Mono;font-size:.58rem;color:{T["text_muted"]};margin-bottom:6px;'>FRAUD TAHMIN</div>
+                    <div style='font-family:Inter;font-size:1rem;font-weight:800;color:{fraud_c};'>{fraud_t}</div>
+                    <div style='font-family:JetBrains Mono;font-size:.75rem;color:{fraud_c};margin-top:4px;'>Skor: {fs:.1f}/100</div>
                     <div style='width:100%;background:{T["border"]};height:4px;border-radius:4px;margin-top:8px;'>
                         <div style='width:{min(fs,100):.0f}%;background:{fraud_c};height:100%;border-radius:4px;'></div>
                     </div>
                 </div>
                 <div>
-                    <div style='font-family:DM Mono;font-size:.58rem;color:{T["text_muted"]};margin-bottom:6px;'>CHURN TAHMIN</div>
-                    <div style='font-family:Syne;font-size:1rem;font-weight:800;color:{churn_c};'>{churn_t}</div>
-                    <div style='font-family:DM Mono;font-size:.75rem;color:{churn_c};margin-top:4px;'>Skor: {cs:.1f}/100</div>
+                    <div style='font-family:JetBrains Mono;font-size:.58rem;color:{T["text_muted"]};margin-bottom:6px;'>CHURN TAHMIN</div>
+                    <div style='font-family:Inter;font-size:1rem;font-weight:800;color:{churn_c};'>{churn_t}</div>
+                    <div style='font-family:JetBrains Mono;font-size:.75rem;color:{churn_c};margin-top:4px;'>Skor: {cs:.1f}/100</div>
                     <div style='width:100%;background:{T["border"]};height:4px;border-radius:4px;margin-top:8px;'>
                         <div style='width:{min(cs,100):.0f}%;background:{churn_c};height:100%;border-radius:4px;'></div>
                     </div>
                 </div>
                 <div>
-                    <div style='font-family:DM Mono;font-size:.58rem;color:{T["text_muted"]};margin-bottom:6px;'>XGB FRAUD SKOR</div>
-                    <div style='font-family:Syne;font-size:1.5rem;font-weight:800;color:{ORANGE};'>
+                    <div style='font-family:JetBrains Mono;font-size:.58rem;color:{T["text_muted"]};margin-bottom:6px;'>XGB FRAUD SKOR</div>
+                    <div style='font-family:Inter;font-size:1.5rem;font-weight:800;color:{ORANGE};'>
                         {round(float(ml_r["fraud_skoru_xgb"]),1) if ml_r.get("fraud_skoru_xgb") is not None else "—"}
                     </div>
                 </div>
                 <div>
-                    <div style='font-family:DM Mono;font-size:.58rem;color:{T["text_muted"]};margin-bottom:6px;'>ANOMALI</div>
-                    <div style='font-family:Syne;font-size:1rem;font-weight:800;
+                    <div style='font-family:JetBrains Mono;font-size:.58rem;color:{T["text_muted"]};margin-bottom:6px;'>ANOMALI</div>
+                    <div style='font-family:Inter;font-size:1rem;font-weight:800;
                                 color:{"#FF4560" if ml_r.get("iso_tahmin",0)==1 else "#00E396"};'>
                         {"Anomali" if ml_r.get("iso_tahmin",0)==1 else "Normal"}
                     </div>
@@ -1738,7 +1743,7 @@ elif sayfa == "⚙️ Admin":
         st.markdown(
             f"<div style='background:{_bg};border:1px solid {_br};border-left:4px solid {_cl};"
             f"border-radius:10px;padding:12px 18px;margin-bottom:16px;"
-            f"font-family:DM Mono;font-size:.82rem;color:{_cl};'>{_mx}</div>",
+            f"font-family:JetBrains Mono;font-size:.82rem;color:{_cl};'>{_mx}</div>",
             unsafe_allow_html=True
         )
         st.session_state.admin_msg = None
@@ -1787,14 +1792,14 @@ elif sayfa == "⚙️ Admin":
                 with _pc1:
                     st.markdown(f"""
                     <div style='padding:8px 0;'>
-                        <div style='font-family:Syne;font-size:.88rem;font-weight:700;
+                        <div style='font-family:Inter;font-size:.88rem;font-weight:700;
                                     color:{T["text_primary"]};'>{_u["username"]}</div>
-                        <div style='font-family:DM Mono;font-size:.6rem;
+                        <div style='font-family:JetBrains Mono;font-size:.6rem;
                                     color:{T["text_muted"]};'>{_u["email"]}</div>
                     </div>""", unsafe_allow_html=True)
                 with _pc2:
                     st.markdown(
-                        f"<div style='font-family:DM Mono;font-size:.6rem;"
+                        f"<div style='font-family:JetBrains Mono;font-size:.6rem;"
                         f"color:{ORANGE};padding-top:12px;'>Bekliyor</div>",
                         unsafe_allow_html=True
                     )
@@ -1828,7 +1833,7 @@ elif sayfa == "⚙️ Admin":
             <div style='background:rgba(0,227,150,.05);border:1px solid rgba(0,227,150,.18);
                         border-radius:12px;padding:30px;text-align:center;'>
                 <div style='font-size:2rem;margin-bottom:8px;'>✅</div>
-                <div style='font-family:Syne;font-size:.9rem;font-weight:700;
+                <div style='font-family:Inter;font-size:.9rem;font-weight:700;
                             color:{GREEN};'>Onay bekleyen kullanici yok</div>
             </div>""", unsafe_allow_html=True)
 
@@ -1846,14 +1851,14 @@ elif sayfa == "⚙️ Admin":
             with _uc2:
                 st.markdown(f"""
                 <div style='padding:5px 0;'>
-                    <div style='font-family:Syne;font-size:.82rem;font-weight:700;
+                    <div style='font-family:Inter;font-size:.82rem;font-weight:700;
                                 color:{T["text_primary"]};'>{_u["username"]}</div>
-                    <div style='font-family:DM Mono;font-size:.58rem;
+                    <div style='font-family:JetBrains Mono;font-size:.58rem;
                                 color:{T["text_muted"]};'>{_u["email"]}</div>
                 </div>""", unsafe_allow_html=True)
             with _uc3:
                 st.markdown(
-                    f"<div style='font-family:DM Mono;font-size:.62rem;"
+                    f"<div style='font-family:JetBrains Mono;font-size:.62rem;"
                     f"color:{T['text_muted']};padding-top:9px;'>"
                     f"{_u.get('display_name') or '—'}</div>",
                     unsafe_allow_html=True
@@ -1874,7 +1879,7 @@ elif sayfa == "⚙️ Admin":
                     st.markdown("</div>", unsafe_allow_html=True)
             with _uc6:
                 st.markdown(
-                    f"<div style='font-family:DM Mono;font-size:.62rem;padding-top:10px;'>"
+                    f"<div style='font-family:JetBrains Mono;font-size:.62rem;padding-top:10px;'>"
                     f"<span style='color:{_sc};'>{_sl}</span></div>",
                     unsafe_allow_html=True
                 )
@@ -1894,7 +1899,7 @@ elif sayfa == "⚙️ Admin":
 
     elif _active_tab == "sistem":
         st.markdown(
-            f"<div style='font-family:Syne;font-size:1rem;font-weight:700;"
+            f"<div style='font-family:Inter;font-size:1rem;font-weight:700;"
             f"color:{T['text_primary']};margin-bottom:14px;'>Sifre Degistir</div>",
             unsafe_allow_html=True
         )
@@ -1927,9 +1932,9 @@ elif sayfa == "⚙️ Admin":
             st.markdown(f"""
             <div style='background:rgba(0,212,255,.05);border:1px solid rgba(0,212,255,.15);
                         border-radius:12px;padding:18px 22px;margin-bottom:16px;'>
-                <div style='font-family:DM Mono;font-size:.6rem;color:{T["text_muted"]};
+                <div style='font-family:JetBrains Mono;font-size:.6rem;color:{T["text_muted"]};
                             text-transform:uppercase;margin-bottom:10px;'>Son ML Calismasi</div>
-                <div style='font-family:DM Mono;font-size:.72rem;
+                <div style='font-family:JetBrains Mono;font-size:.72rem;
                             color:{T["text_secondary"]};line-height:2;'>
                     Hesaplama: <span style='color:{CYAN};'>{str(ml_ozet_s.get("hesaplama_tarihi",""))[:16]}</span> ·
                     Toplam: <span style='color:{GOLD};'>{ml_ozet_s.get("toplam",0):,}</span> ·
