@@ -47,22 +47,12 @@ pip install -r requirements.txt
 \-Ekran GÖRÜNTÜLERİ
 
 
-
 <p align="center">
-
-&#x20; <img src="screenshot4.png" width="45%">
-
-&#x20; <img src="screenshot5.png" width="45%">
-
+  <img src="Financeai_dashboard.png" width="45%">
+  &nbsp;&nbsp;
+  <img src="Financeai_segments.png" width="45%">
 </p>
 
-
-
 <p align="center">
-
-&#x20; <img src="screenshot6.png" width="45%">
-
-&#x20; <img src="screenshot7.png" width="45%">
-
+  <img src="financeai_aiinsights.png" width="45%">
 </p>
-
