@@ -10,4 +10,9 @@ data/
 *.json
 
 # outputs
-outputs/
+outputs/"data/*.db" 
+"data/*.sqlite" 
+"src/reset_password.py" 
+"__pycache__/" 
+"*.pyc" 
+"churn_debug.py" 
