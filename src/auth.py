@@ -54,6 +54,7 @@ except ImportError:
     log.warning("bcrypt kurulu değil — sha256 fallback aktif (pip install bcrypt önerilir)")
 
 try:
+    # pyrefly: ignore [missing-import]
     import jwt as pyjwt
     JWT_AVAILABLE = True
 except ImportError:
